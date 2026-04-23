@@ -1,0 +1,242 @@
+[
+  {
+    "drug1": "Warfarin",
+    "drug2": "Aspirin",
+    "severity": "HIGH",
+    "description": "Increased risk of bleeding. Combined use significantly raises hemorrhagic risk due to additive anticoagulant and antiplatelet effects."
+  },
+  {
+    "drug1": "Warfarin",
+    "drug2": "Ibuprofen",
+    "severity": "HIGH",
+    "description": "NSAIDs increase anticoagulant effect and risk of gastrointestinal bleeding when combined with Warfarin."
+  },
+  {
+    "drug1": "Warfarin",
+    "drug2": "Amoxicillin",
+    "severity": "MODERATE",
+    "description": "Amoxicillin may enhance the anticoagulant effect of Warfarin by disrupting gut flora that produce vitamin K. Monitor INR closely."
+  },
+  {
+    "drug1": "Warfarin",
+    "drug2": "Fluoxetine",
+    "severity": "HIGH",
+    "description": "Fluoxetine inhibits CYP2C9, increasing Warfarin plasma levels and bleeding risk. Dose adjustment and close INR monitoring required."
+  },
+  {
+    "drug1": "Warfarin",
+    "drug2": "Omeprazole",
+    "severity": "MODERATE",
+    "description": "Omeprazole may inhibit CYP2C19 and slightly increase Warfarin levels. Monitor INR when initiating or discontinuing."
+  },
+  {
+    "drug1": "Warfarin",
+    "drug2": "Simvastatin",
+    "severity": "MODERATE",
+    "description": "Simvastatin may enhance the anticoagulant effect of Warfarin. Monitor INR and adjust Warfarin dose as needed."
+  },
+  {
+    "drug1": "Metformin",
+    "drug2": "Alcohol",
+    "severity": "HIGH",
+    "description": "Risk of lactic acidosis. Alcohol consumption while taking Metformin can lead to dangerous buildup of lactic acid, especially with heavy or chronic use."
+  },
+  {
+    "drug1": "Metformin",
+    "drug2": "Ciprofloxacin",
+    "severity": "MODERATE",
+    "description": "Ciprofloxacin may alter blood glucose levels when used with Metformin. Monitor blood glucose closely and adjust dose if needed."
+  },
+  {
+    "drug1": "Metformin",
+    "drug2": "Prednisone",
+    "severity": "MODERATE",
+    "description": "Corticosteroids like Prednisone can raise blood glucose levels, counteracting the hypoglycemic effect of Metformin. Glucose monitoring recommended."
+  },
+  {
+    "drug1": "Lisinopril",
+    "drug2": "Ibuprofen",
+    "severity": "MODERATE",
+    "description": "NSAIDs may reduce the antihypertensive effect of ACE inhibitors and increase risk of renal impairment, especially in dehydrated patients."
+  },
+  {
+    "drug1": "Lisinopril",
+    "drug2": "Losartan",
+    "severity": "HIGH",
+    "description": "Dual RAAS blockade (ACE inhibitor + ARB) increases risk of hypotension, hyperkalemia, and renal impairment. Generally not recommended."
+  },
+  {
+    "drug1": "Lisinopril",
+    "drug2": "Metformin",
+    "severity": "LOW",
+    "description": "ACE inhibitors may slightly enhance the hypoglycemic effect of Metformin. Monitor blood glucose, especially when starting or stopping Lisinopril."
+  },
+  {
+    "drug1": "Amlodipine",
+    "drug2": "Simvastatin",
+    "severity": "HIGH",
+    "description": "Amlodipine increases Simvastatin plasma levels via CYP3A4 inhibition, raising the risk of myopathy and rhabdomyolysis. Simvastatin dose should not exceed 20mg when combined."
+  },
+  {
+    "drug1": "Amlodipine",
+    "drug2": "Losartan",
+    "severity": "LOW",
+    "description": "Additive blood pressure lowering effect. This combination is often intentional but may cause hypotension. Monitor blood pressure regularly."
+  },
+  {
+    "drug1": "Simvastatin",
+    "drug2": "Amoxicillin",
+    "severity": "LOW",
+    "description": "Some antibiotics may slightly increase statin levels. Clinically significant interaction is rare, but monitor for muscle pain or weakness."
+  },
+  {
+    "drug1": "Omeprazole",
+    "drug2": "Clopidogrel",
+    "severity": "HIGH",
+    "description": "Omeprazole significantly reduces the antiplatelet effect of Clopidogrel by inhibiting CYP2C19 activation. Consider alternative PPI (e.g., Pantoprazole)."
+  },
+  {
+    "drug1": "Ciprofloxacin",
+    "drug2": "Diazepam",
+    "severity": "MODERATE",
+    "description": "Ciprofloxacin inhibits CYP1A2 and may increase Diazepam levels, enhancing sedation and CNS depression. Monitor for excessive drowsiness."
+  },
+  {
+    "drug1": "Fluoxetine",
+    "drug2": "Diazepam",
+    "severity": "MODERATE",
+    "description": "Fluoxetine inhibits CYP2C19 and CYP3A4, potentially increasing Diazepam plasma levels and prolonging sedation. Use lower Diazepam doses."
+  },
+  {
+    "drug1": "Fluoxetine",
+    "drug2": "Lithium",
+    "severity": "HIGH",
+    "description": "Combined use increases risk of serotonin syndrome and lithium toxicity. Monitor lithium levels closely and watch for symptoms of serotonin syndrome."
+  },
+  {
+    "drug1": "Lithium",
+    "drug2": "Ibuprofen",
+    "severity": "HIGH",
+    "description": "NSAIDs reduce renal clearance of Lithium, causing elevated serum levels and potential toxicity. Avoid combination or monitor lithium levels closely."
+  },
+  {
+    "drug1": "Lithium",
+    "drug2": "Lisinopril",
+    "severity": "HIGH",
+    "description": "ACE inhibitors decrease Lithium excretion, leading to increased serum Lithium levels and risk of toxicity. Monitor Lithium levels frequently."
+  },
+  {
+    "drug1": "Methotrexate",
+    "drug2": "Ibuprofen",
+    "severity": "HIGH",
+    "description": "NSAIDs reduce renal clearance of Methotrexate, potentially causing severe Methotrexate toxicity including bone marrow suppression and renal failure."
+  },
+  {
+    "drug1": "Methotrexate",
+    "drug2": "Omeprazole",
+    "severity": "MODERATE",
+    "description": "PPIs may decrease Methotrexate renal clearance, increasing plasma levels. Use caution with high-dose Methotrexate and monitor levels."
+  },
+  {
+    "drug1": "Methotrexate",
+    "drug2": "Amoxicillin",
+    "severity": "HIGH",
+    "description": "Penicillins may reduce renal tubular secretion of Methotrexate, leading to increased levels and risk of toxicity. Monitor Methotrexate levels."
+  },
+  {
+    "drug1": "Prednisone",
+    "drug2": "Ibuprofen",
+    "severity": "MODERATE",
+    "description": "Combined use of corticosteroids and NSAIDs significantly increases the risk of gastrointestinal ulceration and bleeding."
+  },
+  {
+    "drug1": "Prednisone",
+    "drug2": "Aspirin",
+    "severity": "MODERATE",
+    "description": "Corticosteroids may increase Aspirin clearance and combined use raises risk of GI bleeding. Monitor for GI symptoms."
+  },
+  {
+    "drug1": "Digoxin",
+    "drug2": "Amiodarone",
+    "severity": "HIGH",
+    "description": "Amiodarone increases Digoxin serum concentration by reducing renal and non-renal clearance. Reduce Digoxin dose by 50% when starting Amiodarone."
+  },
+  {
+    "drug1": "Digoxin",
+    "drug2": "Omeprazole",
+    "severity": "LOW",
+    "description": "Omeprazole may slightly increase Digoxin absorption. Monitor Digoxin levels, especially in patients with renal impairment."
+  },
+  {
+    "drug1": "Digoxin",
+    "drug2": "Amlodipine",
+    "severity": "LOW",
+    "description": "Calcium channel blockers may increase Digoxin levels slightly. Monitor for signs of Digoxin toxicity (nausea, visual changes, arrhythmias)."
+  },
+  {
+    "drug1": "Clopidogrel",
+    "drug2": "Aspirin",
+    "severity": "MODERATE",
+    "description": "Dual antiplatelet therapy increases bleeding risk. Often used intentionally post-stent, but requires careful monitoring for bleeding complications."
+  },
+  {
+    "drug1": "Atorvastatin",
+    "drug2": "Amlodipine",
+    "severity": "MODERATE",
+    "description": "Amlodipine may increase Atorvastatin levels via CYP3A4 inhibition. Limit Atorvastatin to 40mg when combined. Monitor for myopathy."
+  },
+  {
+    "drug1": "Atorvastatin",
+    "drug2": "Ciprofloxacin",
+    "severity": "MODERATE",
+    "description": "Ciprofloxacin may increase statin levels through enzyme inhibition, raising the risk of myopathy. Monitor for muscle pain and weakness."
+  },
+  {
+    "drug1": "Losartan",
+    "drug2": "Ibuprofen",
+    "severity": "MODERATE",
+    "description": "NSAIDs may reduce the antihypertensive effect of ARBs and increase risk of renal impairment. Monitor blood pressure and renal function."
+  },
+  {
+    "drug1": "Losartan",
+    "drug2": "Lithium",
+    "severity": "HIGH",
+    "description": "ARBs decrease Lithium excretion, leading to increased serum Lithium levels and risk of toxicity. Monitor Lithium levels closely."
+  },
+  {
+    "drug1": "Paracetamol",
+    "drug2": "Warfarin",
+    "severity": "MODERATE",
+    "description": "Regular use of Paracetamol (>2g/day for several days) may enhance anticoagulant effect of Warfarin. Occasional use is generally safe, but monitor INR."
+  },
+  {
+    "drug1": "Paracetamol",
+    "drug2": "Alcohol",
+    "severity": "HIGH",
+    "description": "Chronic alcohol use combined with Paracetamol significantly increases risk of hepatotoxicity and liver damage, even at therapeutic doses."
+  },
+  {
+    "drug1": "Ibuprofen",
+    "drug2": "Aspirin",
+    "severity": "MODERATE",
+    "description": "Ibuprofen may interfere with the antiplatelet effect of low-dose Aspirin if taken before Aspirin. Increases GI bleeding risk when combined."
+  },
+  {
+    "drug1": "Ciprofloxacin",
+    "drug2": "Prednisone",
+    "severity": "MODERATE",
+    "description": "Fluoroquinolones combined with corticosteroids significantly increase the risk of tendon rupture, especially in elderly patients."
+  },
+  {
+    "drug1": "Fluoxetine",
+    "drug2": "Methotrexate",
+    "severity": "MODERATE",
+    "description": "Fluoxetine may increase Methotrexate levels through protein binding displacement. Monitor for signs of Methotrexate toxicity."
+  },
+  {
+    "drug1": "Digoxin",
+    "drug2": "Losartan",
+    "severity": "LOW",
+    "description": "Some ARBs may slightly increase Digoxin levels. Monitor Digoxin serum concentration and watch for signs of toxicity."
+  }
+]

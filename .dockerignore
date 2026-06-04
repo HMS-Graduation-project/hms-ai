@@ -6,12 +6,14 @@ venv
 .venv
 ai-env
 
-# ML artifacts (not needed in Docker)
-ml/checkpoints/
-ml/eda/outputs/
+# ML artifacts (exclude training outputs, keep inference runtime)
+ml/checkpoints/*
+!ml/checkpoints/pneumonia_densenet121_best.pt
+ml/eda/
+ml/evaluation/
+ml/training/train_pneumonia.py
 app/data/chest_xray/
 app/data/chest_xray_cleaned/
 app/data/chest_xray_quarantine/
-*.pt
 *.pth
 *.onnx

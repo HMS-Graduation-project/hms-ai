@@ -11,9 +11,6 @@ import base64
 import io
 import logging
 
-import numpy as np
-from PIL import Image
-
 logger = logging.getLogger(__name__)
 
 # Lazy imports -- torch may not be installed in all environments
@@ -45,20 +42,33 @@ def is_model_loaded() -> bool:
 
 
 def get_health() -> dict:
-    from ml.training.config import MODEL_VERSION, DEVICE
-    from ml.inference.pneumonia_predictor import CLINICAL_THRESHOLD
-    predictor = _get_predictor()
-    return {
-        "status": "ok",
-        "modelLoaded": predictor.is_loaded,
-        "modelVersion": MODEL_VERSION,
-        "threshold": CLINICAL_THRESHOLD,
-        "device": str(DEVICE),
-    }
+    try:
+        from ml.training.config import MODEL_VERSION, DEVICE
+        from ml.inference.pneumonia_predictor import CLINICAL_THRESHOLD
+        predictor = _get_predictor()
+        return {
+            "status": "ok",
+            "modelLoaded": predictor.is_loaded,
+            "modelVersion": MODEL_VERSION,
+            "threshold": CLINICAL_THRESHOLD,
+            "device": str(DEVICE),
+        }
+    except Exception as e:
+        # torch not installed in this environment (e.g., lightweight Docker)
+        return {
+            "status": "unavailable",
+            "modelLoaded": False,
+            "modelVersion": "pneumonia-densenet121-v2",
+            "threshold": 0.94,
+            "device": "none",
+            "error": f"PyTorch not available: {type(e).__name__}",
+        }
 
 
 def predict(file_bytes: bytes) -> dict:
     """Run pneumonia prediction on uploaded image bytes."""
+    from PIL import Image
+
     # Validate image
     try:
         img = Image.open(io.BytesIO(file_bytes))
@@ -74,6 +84,8 @@ def explain(file_bytes: bytes) -> dict:
     """Run prediction + Grad-CAM explanation."""
     import tempfile
     from pathlib import Path
+    from PIL import Image
+    import numpy as np
 
     # Validate
     try:

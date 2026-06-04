@@ -3,5 +3,20 @@ __pycache__/
 .env
 venv/
 .venv/
+ai-env/
 *.egg-info/
 dist/
+
+# ML model checkpoints (large binary files)
+*.pt
+*.pth
+*.onnx
+ml/checkpoints/*
+!ml/checkpoints/.gitkeep
+
+# EDA outputs (generated plots)
+ml/eda/outputs/*
+!ml/eda/outputs/.gitkeep
+
+# Chest X-ray dataset (too large for git)
+app/data/chest_xray/

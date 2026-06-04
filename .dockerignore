@@ -4,3 +4,12 @@ __pycache__
 .env
 venv
 .venv
+ai-env
+
+# ML artifacts (not needed in Docker)
+ml/checkpoints/
+ml/eda/outputs/
+app/data/chest_xray/
+*.pt
+*.pth
+*.onnx

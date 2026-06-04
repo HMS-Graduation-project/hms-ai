@@ -1,15 +1,15 @@
 """
-Chest X-Ray Dataset — Professional Medical Imaging EDA.
+Chest X-Ray Dataset — Medical Imaging EDA.
 
-Comprehensive exploratory data analysis for the chest_xray dataset
-covering inventory, quality, statistics, duplicates, leakage, and
-visual inspection.
+Complete exploratory data analysis for the chest_xray dataset.
+Dependencies: PIL (Pillow), numpy. Optional: matplotlib for plots.
 
 Usage:
     cd hms-ai
     python -m ml.eda.chest_xray_eda
     python -m ml.eda.chest_xray_eda --no-plots
-    python -m ml.eda.chest_xray_eda --no-hash        # skip slow duplicate hash scan
+    python -m ml.eda.chest_xray_eda --no-hash
+    python -m ml.eda.chest_xray_eda --no-plots --no-hash
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ import hashlib
 import sys
 import time
 from collections import defaultdict
-from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -40,395 +39,37 @@ SPLITS: dict[str, Path] = {
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
 
+
 # ── Helpers ───────────────────────────────────────────────────────────────
+
+
+def _heading(title: str) -> None:
+    print(f"\n{'━' * 64}")
+    print(f"  {title}")
+    print(f"{'━' * 64}\n")
 
 
 def _iter_images(split_dir: Path):
     """Yield (class_name, file_path) for every image in a split."""
-    for class_name in CLASS_NAMES:
-        class_dir = split_dir / class_name
-        if not class_dir.exists():
+    for cls in CLASS_NAMES:
+        cdir = split_dir / cls
+        if not cdir.exists():
             continue
-        for f in sorted(class_dir.iterdir()):
+        for f in sorted(cdir.iterdir()):
             if f.suffix.lower() in IMAGE_EXTENSIONS:
-                yield class_name, f
+                yield cls, f
 
 
-def _safe_open(path: Path) -> Image.Image | None:
-    """Open an image, return None if corrupted."""
-    try:
-        img = Image.open(path)
-        img.load()  # force full decode
-        return img
-    except Exception:
-        return None
-
-
-def _file_hash(path: Path) -> str:
-    """SHA-256 of file contents."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
+def _md5(path: Path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65_536), b""):
             h.update(chunk)
     return h.hexdigest()
 
 
-def _section(title: str) -> None:
-    print(f"\n{'─' * 60}")
-    print(f"  {title}")
-    print(f"{'─' * 60}\n")
-
-
-# ── Image-level statistics (computed once per image) ──────────────────────
-
-
-class ImageRecord:
-    """Stats for a single image file."""
-
-    __slots__ = (
-        "split", "class_name", "path", "width", "height", "aspect_ratio",
-        "file_size_kb", "mode", "brightness", "contrast", "sharpness",
-        "corrupted", "file_hash",
-    )
-
-    def __init__(self, split: str, class_name: str, path: Path):
-        self.split = split
-        self.class_name = class_name
-        self.path = path
-        self.width: int = 0
-        self.height: int = 0
-        self.aspect_ratio: float = 0.0
-        self.file_size_kb: float = path.stat().st_size / 1024
-        self.mode: str = ""
-        self.brightness: float = 0.0
-        self.contrast: float = 0.0
-        self.sharpness: float = 0.0
-        self.corrupted: bool = False
-        self.file_hash: str = ""
-
-    def analyse(self, compute_hash: bool = True) -> None:
-        img = _safe_open(self.path)
-        if img is None:
-            self.corrupted = True
-            return
-
-        self.width, self.height = img.size
-        self.aspect_ratio = round(self.width / max(self.height, 1), 3)
-        self.mode = img.mode
-
-        # Convert to grayscale for intensity analysis
-        gray = img.convert("L")
-        stat = ImageStat.Stat(gray)
-        self.brightness = round(stat.mean[0], 2)
-        self.contrast = round(stat.stddev[0], 2)
-
-        # Sharpness via Laplacian variance
-        arr = np.array(gray, dtype=np.float64)
-        laplacian = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float64)
-        from scipy.signal import convolve2d  # type: ignore[import-untyped]
-        try:
-            lap = convolve2d(arr, laplacian, mode="valid")
-            self.sharpness = round(float(np.var(lap)), 2)
-        except Exception:
-            # scipy may not be installed; fallback via PIL edge filter
-            edge = gray.filter(ImageFilter.FIND_EDGES)
-            self.sharpness = round(float(ImageStat.Stat(edge).stddev[0]), 2)
-
-        img.close()
-
-        if compute_hash:
-            self.file_hash = _file_hash(self.path)
-
-
-# ══════════════════════════════════════════════════════════════════════════
-#  Analysis Sections
-# ══════════════════════════════════════════════════════════════════════════
-
-
-def run_inventory(records: list[ImageRecord]) -> dict[str, dict[str, int]]:
-    """Section 1: Dataset inventory — counts per split/class."""
-    _section("1. Dataset Inventory")
-
-    counts: dict[str, dict[str, int]] = {}
-    for split in SPLITS:
-        counts[split] = {"NORMAL": 0, "PNEUMONIA": 0}
-    for r in records:
-        counts[r.split][r.class_name] += 1
-
-    grand = 0
-    for split in SPLITS:
-        c = counts[split]
-        total = sum(c.values())
-        grand += total
-        ratio = c["PNEUMONIA"] / max(c["NORMAL"], 1)
-        pct_pneumonia = c["PNEUMONIA"] / max(total, 1) * 100
-        print(
-            f"  {split:6s}  NORMAL={c['NORMAL']:>5d}  PNEUMONIA={c['PNEUMONIA']:>5d}  "
-            f"Total={total:>5d}  Ratio={ratio:.2f}:1  Pneumonia%={pct_pneumonia:.1f}%"
-        )
-
-    print(f"\n  Grand total: {grand:,} images")
-    return counts
-
-
-def run_corrupted(records: list[ImageRecord]) -> list[ImageRecord]:
-    """Section 2: Corrupted image detection."""
-    _section("2. Corrupted Image Detection")
-
-    bad = [r for r in records if r.corrupted]
-    if not bad:
-        print("  No corrupted files detected across all splits.")
-    else:
-        print(f"  Found {len(bad)} corrupted file(s):")
-        for r in bad:
-            print(f"    [{r.split}/{r.class_name}] {r.path.name}")
-    return bad
-
-
-def run_dimensions(records: list[ImageRecord]) -> None:
-    """Section 3: Image dimension analysis."""
-    _section("3. Image Dimensions")
-
-    valid = [r for r in records if not r.corrupted]
-    for split in SPLITS:
-        subset = [r for r in valid if r.split == split]
-        if not subset:
-            continue
-        ws = [r.width for r in subset]
-        hs = [r.height for r in subset]
-        print(
-            f"  {split:6s}  Width: {min(ws):>5d} – {max(ws):<5d} (avg {int(np.mean(ws)):>5d})  "
-            f"Height: {min(hs):>5d} – {max(hs):<5d} (avg {int(np.mean(hs)):>5d})  "
-            f"n={len(subset)}"
-        )
-
-    # unique sizes
-    unique_sizes = set((r.width, r.height) for r in valid)
-    print(f"\n  Unique (W x H) combinations: {len(unique_sizes)}")
-    if len(unique_sizes) <= 10:
-        for w, h in sorted(unique_sizes):
-            cnt = sum(1 for r in valid if r.width == w and r.height == h)
-            print(f"    {w}x{h}: {cnt} images")
-
-
-def run_aspect_ratios(records: list[ImageRecord]) -> None:
-    """Section 4: Aspect ratio analysis."""
-    _section("4. Aspect Ratio Analysis")
-
-    valid = [r for r in records if not r.corrupted]
-    ratios = [r.aspect_ratio for r in valid]
-    square = sum(1 for r in ratios if 0.95 <= r <= 1.05)
-    landscape = sum(1 for r in ratios if r > 1.05)
-    portrait = sum(1 for r in ratios if r < 0.95)
-
-    print(f"  Min ratio:   {min(ratios):.3f}")
-    print(f"  Max ratio:   {max(ratios):.3f}")
-    print(f"  Mean ratio:  {np.mean(ratios):.3f}")
-    print(f"  Square (~1.0):   {square:>5d}  ({square / len(ratios) * 100:.1f}%)")
-    print(f"  Landscape (>1):  {landscape:>5d}  ({landscape / len(ratios) * 100:.1f}%)")
-    print(f"  Portrait (<1):   {portrait:>5d}  ({portrait / len(ratios) * 100:.1f}%)")
-
-
-def run_file_sizes(records: list[ImageRecord]) -> None:
-    """Section 5: File size analysis."""
-    _section("5. File Size Analysis")
-
-    valid = [r for r in records if not r.corrupted]
-    for split in SPLITS:
-        subset = [r for r in valid if r.split == split]
-        if not subset:
-            continue
-        sizes = [r.file_size_kb for r in subset]
-        total_mb = sum(sizes) / 1024
-        print(
-            f"  {split:6s}  Min={min(sizes):>7.1f} KB  Max={max(sizes):>7.1f} KB  "
-            f"Avg={np.mean(sizes):>7.1f} KB  Total={total_mb:>7.1f} MB"
-        )
-
-    all_sizes = [r.file_size_kb for r in valid]
-    total_gb = sum(all_sizes) / 1024 / 1024
-    print(f"\n  Dataset total: {total_gb:.2f} GB")
-
-    # Outlier detection (< 1 KB or > 1 MB)
-    tiny = [r for r in valid if r.file_size_kb < 1.0]
-    huge = [r for r in valid if r.file_size_kb > 1024.0]
-    if tiny:
-        print(f"\n  WARNING: {len(tiny)} files < 1 KB (possibly empty/corrupt):")
-        for r in tiny[:5]:
-            print(f"    [{r.split}/{r.class_name}] {r.path.name} ({r.file_size_kb:.1f} KB)")
-    if huge:
-        print(f"\n  NOTE: {len(huge)} files > 1 MB")
-
-
-def run_brightness_contrast(records: list[ImageRecord]) -> None:
-    """Section 6: Brightness and contrast analysis."""
-    _section("6. Brightness & Contrast Analysis")
-
-    valid = [r for r in records if not r.corrupted]
-
-    for class_name in CLASS_NAMES:
-        subset = [r for r in valid if r.class_name == class_name]
-        if not subset:
-            continue
-        brights = [r.brightness for r in subset]
-        contrasts = [r.contrast for r in subset]
-        print(f"  {class_name:10s}  Brightness: mean={np.mean(brights):>6.1f}  std={np.std(brights):>5.1f}  "
-              f"Contrast: mean={np.mean(contrasts):>6.1f}  std={np.std(contrasts):>5.1f}")
-
-    # Per-split
-    print()
-    for split in SPLITS:
-        subset = [r for r in valid if r.split == split]
-        if not subset:
-            continue
-        brights = [r.brightness for r in subset]
-        print(f"  {split:6s}  Brightness: mean={np.mean(brights):>6.1f}  range=[{min(brights):.0f} – {max(brights):.0f}]")
-
-    # Dark/bright outliers
-    very_dark = [r for r in valid if r.brightness < 30]
-    very_bright = [r for r in valid if r.brightness > 220]
-    if very_dark:
-        print(f"\n  WARNING: {len(very_dark)} very dark images (brightness < 30)")
-    if very_bright:
-        print(f"  WARNING: {len(very_bright)} very bright images (brightness > 220)")
-
-
-def run_sharpness(records: list[ImageRecord]) -> None:
-    """Section 7: Blur / sharpness estimation."""
-    _section("7. Sharpness / Blur Estimation")
-
-    valid = [r for r in records if not r.corrupted]
-    for class_name in CLASS_NAMES:
-        subset = [r for r in valid if r.class_name == class_name]
-        if not subset:
-            continue
-        sharps = [r.sharpness for r in subset]
-        print(f"  {class_name:10s}  Sharpness: mean={np.mean(sharps):>10.1f}  "
-              f"min={min(sharps):>8.1f}  max={max(sharps):>10.1f}")
-
-    all_sharps = [r.sharpness for r in valid]
-    p5 = np.percentile(all_sharps, 5)
-    blurry = [r for r in valid if r.sharpness < p5]
-    print(f"\n  5th percentile sharpness: {p5:.1f}")
-    print(f"  Potentially blurry images (below 5th pctile): {len(blurry)}")
-    if blurry:
-        for r in blurry[:5]:
-            print(f"    [{r.split}/{r.class_name}] {r.path.name}  sharpness={r.sharpness:.1f}")
-
-
-def run_duplicate_filenames(records: list[ImageRecord]) -> None:
-    """Section 8: Duplicate filename detection."""
-    _section("8. Duplicate Filename Detection")
-
-    name_map: dict[str, list[ImageRecord]] = defaultdict(list)
-    for r in records:
-        name_map[r.path.name].append(r)
-
-    dupes = {name: recs for name, recs in name_map.items() if len(recs) > 1}
-    if not dupes:
-        print("  No duplicate filenames across splits.")
-    else:
-        print(f"  {len(dupes)} filename(s) appear in multiple locations:")
-        for name, recs in sorted(dupes.items())[:20]:
-            locs = ", ".join(f"{r.split}/{r.class_name}" for r in recs)
-            print(f"    {name} → {locs}")
-        if len(dupes) > 20:
-            print(f"    ... and {len(dupes) - 20} more")
-
-
-def run_exact_duplicates(records: list[ImageRecord]) -> dict[str, list[ImageRecord]]:
-    """Section 9: Exact duplicate detection via SHA-256."""
-    _section("9. Exact Duplicate Detection (SHA-256)")
-
-    hashed = [r for r in records if r.file_hash and not r.corrupted]
-    if not hashed:
-        print("  Skipped (no hashes computed — run without --no-hash)")
-        return {}
-
-    hash_map: dict[str, list[ImageRecord]] = defaultdict(list)
-    for r in hashed:
-        hash_map[r.file_hash].append(r)
-
-    dupes = {h: recs for h, recs in hash_map.items() if len(recs) > 1}
-    total_dup_images = sum(len(recs) - 1 for recs in dupes.values())
-
-    if not dupes:
-        print("  No exact duplicate images found.")
-    else:
-        print(f"  {len(dupes)} duplicate group(s), {total_dup_images} redundant image(s):")
-        for h, recs in sorted(dupes.items(), key=lambda x: -len(x[1]))[:15]:
-            paths = [f"{r.split}/{r.class_name}/{r.path.name}" for r in recs]
-            print(f"    [{len(recs)}x] {paths[0]}")
-            for p in paths[1:]:
-                print(f"         = {p}")
-        if len(dupes) > 15:
-            print(f"    ... and {len(dupes) - 15} more groups")
-    return dupes
-
-
-def run_leakage_detection(records: list[ImageRecord]) -> None:
-    """Section 10: Data leakage detection across splits."""
-    _section("10. Data Leakage Detection (Train ↔ Val ↔ Test)")
-
-    hashed = [r for r in records if r.file_hash and not r.corrupted]
-    if not hashed:
-        print("  Skipped (no hashes computed)")
-        return
-
-    split_hashes: dict[str, set[str]] = defaultdict(set)
-    hash_to_rec: dict[str, ImageRecord] = {}
-    for r in hashed:
-        split_hashes[r.split].add(r.file_hash)
-        hash_to_rec[f"{r.split}:{r.file_hash}"] = r
-
-    pairs = [("train", "val"), ("train", "test"), ("val", "test")]
-    found_leakage = False
-
-    for s1, s2 in pairs:
-        overlap = split_hashes.get(s1, set()) & split_hashes.get(s2, set())
-        if overlap:
-            found_leakage = True
-            print(f"  LEAKAGE: {len(overlap)} identical image(s) in both {s1} and {s2}:")
-            for h in sorted(overlap)[:10]:
-                r1 = hash_to_rec.get(f"{s1}:{h}")
-                r2 = hash_to_rec.get(f"{s2}:{h}")
-                n1 = f"{r1.class_name}/{r1.path.name}" if r1 else "?"
-                n2 = f"{r2.class_name}/{r2.path.name}" if r2 else "?"
-                print(f"    {s1}/{n1}  ==  {s2}/{n2}")
-        else:
-            print(f"  {s1} ↔ {s2}: no leakage detected")
-
-    if not found_leakage:
-        print("\n  No cross-split data leakage detected.")
-
-
-def run_class_comparison(records: list[ImageRecord]) -> None:
-    """Section 11: NORMAL vs PNEUMONIA statistical comparison."""
-    _section("11. Class Comparison: NORMAL vs PNEUMONIA")
-
-    valid = [r for r in records if not r.corrupted]
-
-    for class_name in CLASS_NAMES:
-        subset = [r for r in valid if r.class_name == class_name]
-        if not subset:
-            continue
-        brights = [r.brightness for r in subset]
-        contrasts = [r.contrast for r in subset]
-        sharps = [r.sharpness for r in subset]
-        sizes = [r.file_size_kb for r in subset]
-
-        print(f"  {class_name} (n={len(subset)})")
-        print(f"    Brightness  mean={np.mean(brights):>6.1f}  median={np.median(brights):>6.1f}  std={np.std(brights):>5.1f}")
-        print(f"    Contrast    mean={np.mean(contrasts):>6.1f}  median={np.median(contrasts):>6.1f}  std={np.std(contrasts):>5.1f}")
-        print(f"    Sharpness   mean={np.mean(sharps):>10.1f}  median={np.median(sharps):>10.1f}")
-        print(f"    File size   mean={np.mean(sizes):>7.1f} KB  median={np.median(sizes):>7.1f} KB")
-        print()
-
-
-# ── Plots ─────────────────────────────────────────────────────────────────
-
-
 def _get_plt():
+    """Return matplotlib.pyplot or None if unavailable."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -438,7 +79,360 @@ def _get_plt():
         return None
 
 
-def plot_class_distribution(counts: dict[str, dict[str, int]]) -> None:
+# ── Per-image record ──────────────────────────────────────────────────────
+
+
+class Rec:
+    """Stores all per-image statistics."""
+
+    __slots__ = (
+        "split", "cls", "path", "w", "h", "ar", "size_kb", "mode",
+        "brightness", "contrast", "sharpness", "corrupted", "md5",
+    )
+
+    def __init__(self, split: str, cls: str, path: Path):
+        self.split = split
+        self.cls = cls
+        self.path = path
+        self.w: int = 0
+        self.h: int = 0
+        self.ar: float = 0.0
+        self.size_kb: float = path.stat().st_size / 1024.0
+        self.mode: str = ""
+        self.brightness: float = 0.0
+        self.contrast: float = 0.0
+        self.sharpness: float = 0.0
+        self.corrupted: bool = False
+        self.md5: str = ""
+
+    def analyse(self, do_hash: bool) -> None:
+        try:
+            img = Image.open(self.path)
+            img.load()
+        except Exception:
+            self.corrupted = True
+            return
+
+        self.w, self.h = img.size
+        self.ar = round(self.w / max(self.h, 1), 4)
+        self.mode = img.mode
+
+        gray = img.convert("L")
+        stat = ImageStat.Stat(gray)
+        self.brightness = round(stat.mean[0], 2)
+        self.contrast = round(stat.stddev[0], 2)
+
+        # Sharpness: variance of Laplacian (PIL edge filter, no scipy needed)
+        edges = gray.filter(ImageFilter.Kernel(
+            size=(3, 3),
+            kernel=[0, 1, 0, 1, -4, 1, 0, 1, 0],
+            scale=1,
+            offset=128,
+        ))
+        self.sharpness = round(float(ImageStat.Stat(edges).stddev[0]), 2)
+
+        img.close()
+        if do_hash:
+            self.md5 = _md5(self.path)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Analysis sections
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def sec_inventory(recs: list[Rec]) -> dict[str, dict[str, int]]:
+    _heading("1 · Dataset Inventory")
+
+    counts: dict[str, dict[str, int]] = {s: {c: 0 for c in CLASS_NAMES} for s in SPLITS}
+    for r in recs:
+        counts[r.split][r.cls] += 1
+
+    grand = 0
+    for s in SPLITS:
+        c = counts[s]
+        tot = sum(c.values())
+        grand += tot
+        ratio = c["PNEUMONIA"] / max(c["NORMAL"], 1)
+        pct = c["PNEUMONIA"] / max(tot, 1) * 100
+        print(
+            f"  {s:6s}  NORMAL={c['NORMAL']:>5}  PNEUMONIA={c['PNEUMONIA']:>5}  "
+            f"Total={tot:>5}  Ratio={ratio:.2f}:1  Pneumonia%={pct:.1f}%"
+        )
+    print(f"\n  Grand total: {grand:,} images")
+    return counts
+
+
+def sec_corrupted(recs: list[Rec]) -> list[Rec]:
+    _heading("2 · Corrupted Image Detection")
+    bad = [r for r in recs if r.corrupted]
+    if bad:
+        print(f"  Found {len(bad)} corrupted file(s):")
+        for r in bad:
+            print(f"    [{r.split}/{r.cls}] {r.path.name}")
+    else:
+        print("  All files OK — no corruption detected.")
+    return bad
+
+
+def sec_dimensions(recs: list[Rec]) -> None:
+    _heading("3 · Image Dimensions")
+    ok = [r for r in recs if not r.corrupted]
+    for s in SPLITS:
+        sub = [r for r in ok if r.split == s]
+        if not sub:
+            continue
+        ws = [r.w for r in sub]
+        hs = [r.h for r in sub]
+        print(
+            f"  {s:6s}  W: {min(ws):>5}–{max(ws):<5} avg={int(np.mean(ws)):>5}  "
+            f"H: {min(hs):>5}–{max(hs):<5} avg={int(np.mean(hs)):>5}  n={len(sub)}"
+        )
+
+    uniq = set((r.w, r.h) for r in ok)
+    print(f"\n  Unique (W×H) combinations: {len(uniq)}")
+    if len(uniq) <= 12:
+        for w, h in sorted(uniq):
+            n = sum(1 for r in ok if r.w == w and r.h == h)
+            print(f"    {w}×{h}: {n}")
+
+
+def sec_aspect_ratios(recs: list[Rec]) -> None:
+    _heading("4 · Aspect Ratio Analysis")
+    ok = [r for r in recs if not r.corrupted]
+    ars = [r.ar for r in ok]
+    sq = sum(1 for a in ars if 0.95 <= a <= 1.05)
+    ls = sum(1 for a in ars if a > 1.05)
+    pt = sum(1 for a in ars if a < 0.95)
+    print(f"  Range:     {min(ars):.3f} – {max(ars):.3f}")
+    print(f"  Mean:      {np.mean(ars):.3f}   Median: {np.median(ars):.3f}")
+    print(f"  Square:    {sq:>5}  ({sq / len(ars) * 100:.1f}%)")
+    print(f"  Landscape: {ls:>5}  ({ls / len(ars) * 100:.1f}%)")
+    print(f"  Portrait:  {pt:>5}  ({pt / len(ars) * 100:.1f}%)")
+
+    outliers = [r for r in ok if r.ar > 2.5 or r.ar < 0.5]
+    if outliers:
+        print(f"\n  Extreme aspect ratios ({len(outliers)}):")
+        for r in outliers[:8]:
+            print(f"    [{r.split}/{r.cls}] {r.path.name}  {r.w}×{r.h}  ar={r.ar:.3f}")
+
+
+def sec_file_sizes(recs: list[Rec]) -> None:
+    _heading("5 · File Size Analysis")
+    ok = [r for r in recs if not r.corrupted]
+
+    for s in SPLITS:
+        sub = [r for r in ok if r.split == s]
+        if not sub:
+            continue
+        sizes = [r.size_kb for r in sub]
+        print(
+            f"  {s:6s}  Min={min(sizes):>7.1f} KB  Max={max(sizes):>8.1f} KB  "
+            f"Avg={np.mean(sizes):>7.1f} KB  Total={sum(sizes) / 1024:>7.1f} MB"
+        )
+
+    print(f"\n  Per class:")
+    for cls in CLASS_NAMES:
+        sub = [r for r in ok if r.cls == cls]
+        sizes = [r.size_kb for r in sub]
+        print(
+            f"    {cls:12s}  Avg={np.mean(sizes):>7.1f} KB  "
+            f"Median={np.median(sizes):>7.1f} KB  n={len(sub)}"
+        )
+
+    all_sz = [r.size_kb for r in ok]
+    print(f"\n  Dataset total: {sum(all_sz) / 1024 / 1024:.2f} GB")
+
+    tiny = [r for r in ok if r.size_kb < 5]
+    huge = [r for r in ok if r.size_kb > 1500]
+    if tiny:
+        print(f"\n  ⚠ {len(tiny)} file(s) < 5 KB:")
+        for r in tiny[:5]:
+            print(f"    [{r.split}/{r.cls}] {r.path.name} ({r.size_kb:.1f} KB)")
+    if huge:
+        print(f"\n  Note: {len(huge)} file(s) > 1.5 MB")
+
+
+def sec_brightness_contrast(recs: list[Rec]) -> None:
+    _heading("6 · Brightness & Contrast")
+    ok = [r for r in recs if not r.corrupted]
+
+    print("  By class:")
+    for cls in CLASS_NAMES:
+        sub = [r for r in ok if r.cls == cls]
+        bs = [r.brightness for r in sub]
+        cs = [r.contrast for r in sub]
+        print(
+            f"    {cls:12s}  Brightness: mean={np.mean(bs):>6.1f}  std={np.std(bs):>5.1f}  "
+            f"[{min(bs):.0f}–{max(bs):.0f}]"
+        )
+        print(
+            f"    {'':12s}  Contrast:   mean={np.mean(cs):>6.1f}  std={np.std(cs):>5.1f}  "
+            f"[{min(cs):.0f}–{max(cs):.0f}]"
+        )
+
+    print("\n  By split:")
+    for s in SPLITS:
+        sub = [r for r in ok if r.split == s]
+        if not sub:
+            continue
+        bs = [r.brightness for r in sub]
+        print(
+            f"    {s:6s}  Brightness: mean={np.mean(bs):>6.1f}  "
+            f"range=[{min(bs):.0f}–{max(bs):.0f}]  n={len(sub)}"
+        )
+
+    dark = [r for r in ok if r.brightness < 30]
+    bright = [r for r in ok if r.brightness > 220]
+    if dark:
+        print(f"\n  ⚠ {len(dark)} very dark image(s) (brightness < 30)")
+    if bright:
+        print(f"  ⚠ {len(bright)} very bright image(s) (brightness > 220)")
+        for r in bright[:5]:
+            print(f"    [{r.split}/{r.cls}] {r.path.name}  brightness={r.brightness:.0f}")
+    if not dark and not bright:
+        print("\n  No brightness outliers detected.")
+
+
+def sec_sharpness(recs: list[Rec]) -> None:
+    _heading("7 · Sharpness / Blur Estimation")
+    ok = [r for r in recs if not r.corrupted]
+
+    for cls in CLASS_NAMES:
+        sub = [r for r in ok if r.cls == cls]
+        ss = [r.sharpness for r in sub]
+        print(
+            f"  {cls:12s}  mean={np.mean(ss):>6.1f}  "
+            f"median={np.median(ss):>6.1f}  "
+            f"min={min(ss):>5.1f}  max={max(ss):>6.1f}"
+        )
+
+    all_s = [r.sharpness for r in ok]
+    p5 = np.percentile(all_s, 5)
+    blurry = [r for r in ok if r.sharpness < p5]
+    print(f"\n  5th percentile: {p5:.1f}")
+    print(f"  Potentially blurry (below 5th pctile): {len(blurry)}")
+    if blurry:
+        for r in sorted(blurry, key=lambda x: x.sharpness)[:5]:
+            print(f"    [{r.split}/{r.cls}] {r.path.name}  sharpness={r.sharpness:.1f}")
+
+
+def sec_dup_filenames(recs: list[Rec]) -> None:
+    _heading("8 · Duplicate Filename Detection")
+    name_map: dict[str, list[Rec]] = defaultdict(list)
+    for r in recs:
+        name_map[r.path.name].append(r)
+
+    dupes = {n: rs for n, rs in name_map.items() if len(rs) > 1}
+    if not dupes:
+        print("  No duplicate filenames across the dataset.")
+    else:
+        print(f"  {len(dupes)} filename(s) appear in multiple locations:")
+        for n, rs in sorted(dupes.items())[:15]:
+            locs = ", ".join(f"{r.split}/{r.cls}" for r in rs)
+            print(f"    {n} → {locs}")
+        if len(dupes) > 15:
+            print(f"    … and {len(dupes) - 15} more")
+
+
+def sec_exact_dups(recs: list[Rec]) -> dict[str, list[Rec]]:
+    _heading("9 · Exact Duplicate Detection (MD5)")
+    hashed = [r for r in recs if r.md5 and not r.corrupted]
+    if not hashed:
+        print("  Skipped — run without --no-hash to enable.")
+        return {}
+
+    hmap: dict[str, list[Rec]] = defaultdict(list)
+    for r in hashed:
+        hmap[r.md5].append(r)
+
+    dupes = {h: rs for h, rs in hmap.items() if len(rs) > 1}
+    redundant = sum(len(rs) - 1 for rs in dupes.values())
+
+    if not dupes:
+        print("  No exact duplicate images found.")
+    else:
+        print(f"  {len(dupes)} duplicate group(s), {redundant} redundant image(s):\n")
+        for h, rs in sorted(dupes.items(), key=lambda x: -len(x[1]))[:12]:
+            first = rs[0]
+            print(f"    [{len(rs)}×] {first.split}/{first.cls}/{first.path.name}")
+            for r in rs[1:]:
+                print(f"         = {r.split}/{r.cls}/{r.path.name}")
+        if len(dupes) > 12:
+            print(f"    … and {len(dupes) - 12} more groups")
+    return dupes
+
+
+def sec_leakage(recs: list[Rec]) -> None:
+    _heading("10 · Data Leakage Detection (Train ↔ Val ↔ Test)")
+    hashed = [r for r in recs if r.md5 and not r.corrupted]
+    if not hashed:
+        print("  Skipped — run without --no-hash to enable.")
+        return
+
+    split_h: dict[str, set[str]] = defaultdict(set)
+    h2r: dict[str, Rec] = {}
+    for r in hashed:
+        split_h[r.split].add(r.md5)
+        h2r[f"{r.split}:{r.md5}"] = r
+
+    pairs = [("train", "val"), ("train", "test"), ("val", "test")]
+    leaked = False
+    for s1, s2 in pairs:
+        overlap = split_h.get(s1, set()) & split_h.get(s2, set())
+        if overlap:
+            leaked = True
+            print(f"  ⚠ LEAKAGE: {len(overlap)} identical image(s) in {s1} AND {s2}:")
+            for h in sorted(overlap)[:8]:
+                r1 = h2r.get(f"{s1}:{h}")
+                r2 = h2r.get(f"{s2}:{h}")
+                n1 = f"{r1.cls}/{r1.path.name}" if r1 else "?"
+                n2 = f"{r2.cls}/{r2.path.name}" if r2 else "?"
+                print(f"    {s1}/{n1}  ==  {s2}/{n2}")
+        else:
+            print(f"  {s1} ↔ {s2}: clean — no overlap.")
+
+    if not leaked:
+        print("\n  ✓ No cross-split leakage detected.")
+
+
+def sec_class_comparison(recs: list[Rec]) -> None:
+    _heading("11 · Class Comparison: NORMAL vs PNEUMONIA")
+    ok = [r for r in recs if not r.corrupted]
+
+    for cls in CLASS_NAMES:
+        sub = [r for r in ok if r.cls == cls]
+        bs = [r.brightness for r in sub]
+        cs = [r.contrast for r in sub]
+        ss = [r.sharpness for r in sub]
+        fs = [r.size_kb for r in sub]
+        ws = [r.w for r in sub]
+        hs = [r.h for r in sub]
+
+        print(f"  {cls} (n={len(sub)})")
+        print(f"    Brightness   mean={np.mean(bs):>6.1f}  median={np.median(bs):>6.1f}  std={np.std(bs):>5.1f}")
+        print(f"    Contrast     mean={np.mean(cs):>6.1f}  median={np.median(cs):>6.1f}  std={np.std(cs):>5.1f}")
+        print(f"    Sharpness    mean={np.mean(ss):>6.1f}  median={np.median(ss):>6.1f}")
+        print(f"    File size    mean={np.mean(fs):>7.1f} KB  median={np.median(fs):>7.1f} KB")
+        print(f"    Width        mean={np.mean(ws):>7.0f} px  median={np.median(ws):>7.0f} px")
+        print(f"    Height       mean={np.mean(hs):>7.0f} px  median={np.median(hs):>7.0f} px")
+        print()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Plots
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _bar_label(ax, bars) -> None:
+    for b in bars:
+        ax.text(
+            b.get_x() + b.get_width() / 2, b.get_height() + 20,
+            str(int(b.get_height())), ha="center", va="bottom", fontsize=8,
+        )
+
+
+def plot_class_dist(counts: dict[str, dict[str, int]]) -> None:
     plt = _get_plt()
     if not plt:
         return
@@ -447,16 +441,11 @@ def plot_class_distribution(counts: dict[str, dict[str, int]]) -> None:
     splits = list(counts.keys())
     x = np.arange(len(splits))
     w = 0.35
-
     fig, ax = plt.subplots(figsize=(8, 5))
-    normal = [counts[s]["NORMAL"] for s in splits]
-    pneumonia = [counts[s]["PNEUMONIA"] for s in splits]
-
-    b1 = ax.bar(x - w / 2, normal, w, label="NORMAL", color="#4CAF50")
-    b2 = ax.bar(x + w / 2, pneumonia, w, label="PNEUMONIA", color="#F44336")
-    ax.bar_label(b1, padding=3, fontsize=9)
-    ax.bar_label(b2, padding=3, fontsize=9)
-
+    b1 = ax.bar(x - w / 2, [counts[s]["NORMAL"] for s in splits], w, label="NORMAL", color="#4CAF50")
+    b2 = ax.bar(x + w / 2, [counts[s]["PNEUMONIA"] for s in splits], w, label="PNEUMONIA", color="#F44336")
+    _bar_label(ax, b1)
+    _bar_label(ax, b2)
     ax.set_xlabel("Split")
     ax.set_ylabel("Count")
     ax.set_title("Class Distribution by Split")
@@ -466,150 +455,100 @@ def plot_class_distribution(counts: dict[str, dict[str, int]]) -> None:
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "class_distribution.png", dpi=150)
     plt.close()
-    print(f"  Saved: class_distribution.png")
+    print(f"  ✓ class_distribution.png")
 
 
-def plot_dimension_scatter(records: list[ImageRecord]) -> None:
+def plot_dimensions(recs: list[Rec]) -> None:
     plt = _get_plt()
     if not plt:
         return
-
-    valid = [r for r in records if not r.corrupted]
+    ok = [r for r in recs if not r.corrupted]
     fig, ax = plt.subplots(figsize=(8, 6))
-    for class_name, color in [("NORMAL", "#4CAF50"), ("PNEUMONIA", "#F44336")]:
-        subset = [r for r in valid if r.class_name == class_name]
-        ax.scatter(
-            [r.width for r in subset], [r.height for r in subset],
-            alpha=0.3, s=8, label=class_name, color=color,
-        )
+    for cls, color in [("NORMAL", "#4CAF50"), ("PNEUMONIA", "#F44336")]:
+        sub = [r for r in ok if r.cls == cls]
+        ax.scatter([r.w for r in sub], [r.h for r in sub], alpha=0.25, s=6, label=cls, color=color)
     ax.set_xlabel("Width (px)")
     ax.set_ylabel("Height (px)")
-    ax.set_title("Image Dimensions")
+    ax.set_title("Image Dimensions by Class")
     ax.legend()
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "dimension_scatter.png", dpi=150)
     plt.close()
-    print(f"  Saved: dimension_scatter.png")
+    print(f"  ✓ dimension_scatter.png")
 
 
-def plot_brightness_histograms(records: list[ImageRecord]) -> None:
+def plot_brightness(recs: list[Rec]) -> None:
     plt = _get_plt()
     if not plt:
         return
-
-    valid = [r for r in records if not r.corrupted]
+    ok = [r for r in recs if not r.corrupted]
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    for idx, class_name in enumerate(CLASS_NAMES):
-        subset = [r for r in valid if r.class_name == class_name]
-        brights = [r.brightness for r in subset]
-        color = "#4CAF50" if class_name == "NORMAL" else "#F44336"
-        axes[idx].hist(brights, bins=40, color=color, alpha=0.8, edgecolor="white")
-        axes[idx].set_title(f"{class_name} — Brightness Distribution")
-        axes[idx].set_xlabel("Mean Pixel Intensity")
-        axes[idx].set_ylabel("Count")
-        axes[idx].axvline(np.mean(brights), color="black", linestyle="--", label=f"Mean={np.mean(brights):.0f}")
-        axes[idx].legend()
-
+    for i, cls in enumerate(CLASS_NAMES):
+        sub = [r for r in ok if r.cls == cls]
+        vals = [r.brightness for r in sub]
+        c = "#4CAF50" if cls == "NORMAL" else "#F44336"
+        axes[i].hist(vals, bins=40, color=c, alpha=0.85, edgecolor="white")
+        axes[i].axvline(np.mean(vals), color="black", ls="--", label=f"Mean={np.mean(vals):.0f}")
+        axes[i].set_title(f"{cls} — Brightness")
+        axes[i].set_xlabel("Mean Pixel Intensity")
+        axes[i].set_ylabel("Count")
+        axes[i].legend()
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "brightness_histograms.png", dpi=150)
     plt.close()
-    print(f"  Saved: brightness_histograms.png")
+    print(f"  ✓ brightness_histograms.png")
 
 
-def plot_contrast_comparison(records: list[ImageRecord]) -> None:
+def plot_contrast(recs: list[Rec]) -> None:
     plt = _get_plt()
     if not plt:
         return
-
-    valid = [r for r in records if not r.corrupted]
+    ok = [r for r in recs if not r.corrupted]
     fig, ax = plt.subplots(figsize=(8, 5))
-
-    data = []
-    labels = []
+    data = [[r.contrast for r in ok if r.cls == cls] for cls in CLASS_NAMES]
     colors = ["#4CAF50", "#F44336"]
-    for class_name in CLASS_NAMES:
-        subset = [r for r in valid if r.class_name == class_name]
-        data.append([r.contrast for r in subset])
-        labels.append(class_name)
-
-    bp = ax.boxplot(data, labels=labels, patch_artist=True)
-    for patch, color in zip(bp["boxes"], colors):
-        patch.set_facecolor(color)
+    bp = ax.boxplot(data, labels=CLASS_NAMES, patch_artist=True)
+    for patch, c in zip(bp["boxes"], colors):
+        patch.set_facecolor(c)
         patch.set_alpha(0.6)
-
-    ax.set_ylabel("Contrast (Std Dev of Pixel Intensity)")
-    ax.set_title("Contrast Distribution: NORMAL vs PNEUMONIA")
+    ax.set_ylabel("Contrast (Pixel Intensity Std Dev)")
+    ax.set_title("Contrast: NORMAL vs PNEUMONIA")
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "contrast_boxplot.png", dpi=150)
     plt.close()
-    print(f"  Saved: contrast_boxplot.png")
+    print(f"  ✓ contrast_boxplot.png")
 
 
-def plot_file_size_distribution(records: list[ImageRecord]) -> None:
+def plot_file_sizes(recs: list[Rec]) -> None:
     plt = _get_plt()
     if not plt:
         return
-
-    valid = [r for r in records if not r.corrupted]
+    ok = [r for r in recs if not r.corrupted]
     fig, ax = plt.subplots(figsize=(8, 5))
-    sizes = [r.file_size_kb for r in valid]
-    ax.hist(sizes, bins=50, color="#2196F3", alpha=0.8, edgecolor="white")
+    for cls, c in [("NORMAL", "#4CAF50"), ("PNEUMONIA", "#F44336")]:
+        vals = [r.size_kb for r in ok if r.cls == cls]
+        ax.hist(vals, bins=50, alpha=0.55, label=cls, color=c, edgecolor="white")
     ax.set_xlabel("File Size (KB)")
     ax.set_ylabel("Count")
-    ax.set_title("File Size Distribution")
-    ax.axvline(np.mean(sizes), color="red", linestyle="--", label=f"Mean={np.mean(sizes):.0f} KB")
+    ax.set_title("File Size Distribution by Class")
     ax.legend()
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "file_size_distribution.png", dpi=150)
     plt.close()
-    print(f"  Saved: file_size_distribution.png")
+    print(f"  ✓ file_size_distribution.png")
 
 
-def plot_sample_grid(records: list[ImageRecord]) -> None:
+def plot_sharpness(recs: list[Rec]) -> None:
     plt = _get_plt()
     if not plt:
         return
-
-    fig, axes = plt.subplots(2, 5, figsize=(15, 6))
-    fig.suptitle("Sample Chest X-Ray Images", fontsize=14)
-
-    train_records = [r for r in records if r.split == "train" and not r.corrupted]
-    for row, class_name in enumerate(CLASS_NAMES):
-        subset = [r for r in train_records if r.class_name == class_name][:5]
-        for col, r in enumerate(subset):
-            img = _safe_open(r.path)
-            if img:
-                axes[row, col].imshow(img.convert("L"), cmap="gray")
-                axes[row, col].set_title(f"{class_name}\n{r.width}x{r.height}", fontsize=8)
-                img.close()
-            axes[row, col].axis("off")
-        # blank unused cols
-        for col in range(len(subset), 5):
-            axes[row, col].axis("off")
-
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "sample_grid.png", dpi=150)
-    plt.close()
-    print(f"  Saved: sample_grid.png")
-
-
-def plot_sharpness_distribution(records: list[ImageRecord]) -> None:
-    plt = _get_plt()
-    if not plt:
-        return
-
-    valid = [r for r in records if not r.corrupted]
+    ok = [r for r in recs if not r.corrupted]
     fig, ax = plt.subplots(figsize=(8, 5))
-
-    for class_name, color in [("NORMAL", "#4CAF50"), ("PNEUMONIA", "#F44336")]:
-        subset = [r for r in valid if r.class_name == class_name]
-        sharps = [r.sharpness for r in subset]
-        # clip extreme outliers for readable histogram
-        p99 = np.percentile(sharps, 99)
-        clipped = [min(s, p99) for s in sharps]
-        ax.hist(clipped, bins=40, alpha=0.5, label=class_name, color=color, edgecolor="white")
-
+    for cls, c in [("NORMAL", "#4CAF50"), ("PNEUMONIA", "#F44336")]:
+        vals = [r.sharpness for r in ok if r.cls == cls]
+        p99 = np.percentile(vals, 99)
+        clipped = [min(v, p99) for v in vals]
+        ax.hist(clipped, bins=40, alpha=0.55, label=cls, color=c, edgecolor="white")
     ax.set_xlabel("Sharpness (Laplacian Variance)")
     ax.set_ylabel("Count")
     ax.set_title("Sharpness Distribution by Class")
@@ -617,111 +556,201 @@ def plot_sharpness_distribution(records: list[ImageRecord]) -> None:
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "sharpness_distribution.png", dpi=150)
     plt.close()
-    print(f"  Saved: sharpness_distribution.png")
+    print(f"  ✓ sharpness_distribution.png")
 
 
-# ── CSV Export ────────────────────────────────────────────────────────────
+def plot_intensity_hist(recs: list[Rec]) -> None:
+    """Pixel intensity histogram from a random sample of images."""
+    plt = _get_plt()
+    if not plt:
+        return
+    ok = [r for r in recs if not r.corrupted and r.split == "train"]
+
+    rng = np.random.RandomState(42)
+    sample_n = min(200, len(ok))
+    indices = rng.choice(len(ok), sample_n, replace=False)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for i, cls in enumerate(CLASS_NAMES):
+        sampled = [ok[j] for j in indices if ok[j].cls == cls][:100]
+        all_pixels: list[np.ndarray] = []
+        for r in sampled:
+            try:
+                img = Image.open(r.path).convert("L")
+                all_pixels.append(np.array(img).ravel())
+                img.close()
+            except Exception:
+                pass
+        if all_pixels:
+            merged = np.concatenate(all_pixels)
+            c = "#4CAF50" if cls == "NORMAL" else "#F44336"
+            axes[i].hist(merged, bins=64, color=c, alpha=0.85, edgecolor="white", density=True)
+            axes[i].set_title(f"{cls} — Pixel Intensity (sample)")
+            axes[i].set_xlabel("Pixel Value (0–255)")
+            axes[i].set_ylabel("Density")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "pixel_intensity_histograms.png", dpi=150)
+    plt.close()
+    print(f"  ✓ pixel_intensity_histograms.png")
 
 
-def export_csv(records: list[ImageRecord]) -> None:
-    """Export per-image statistics to CSV."""
+def plot_sample_grid(recs: list[Rec]) -> None:
+    plt = _get_plt()
+    if not plt:
+        return
+    fig, axes = plt.subplots(2, 5, figsize=(16, 7))
+    fig.suptitle("Sample Chest X-Ray Images (Train Set)", fontsize=14)
+
+    train = [r for r in recs if r.split == "train" and not r.corrupted]
+    for row, cls in enumerate(CLASS_NAMES):
+        sub = [r for r in train if r.cls == cls][:5]
+        for col, r in enumerate(sub):
+            try:
+                img = Image.open(r.path).convert("L")
+                axes[row, col].imshow(np.array(img), cmap="gray")
+                axes[row, col].set_title(f"{cls}\n{r.w}×{r.h}", fontsize=8)
+                img.close()
+            except Exception:
+                pass
+            axes[row, col].axis("off")
+        for col in range(len(sub), 5):
+            axes[row, col].axis("off")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "sample_grid.png", dpi=150)
+    plt.close()
+    print(f"  ✓ sample_grid.png")
+
+
+def plot_aspect_ratio(recs: list[Rec]) -> None:
+    plt = _get_plt()
+    if not plt:
+        return
+    ok = [r for r in recs if not r.corrupted]
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for cls, c in [("NORMAL", "#4CAF50"), ("PNEUMONIA", "#F44336")]:
+        vals = [r.ar for r in ok if r.cls == cls]
+        ax.hist(vals, bins=40, alpha=0.55, label=cls, color=c, edgecolor="white")
+    ax.set_xlabel("Aspect Ratio (W/H)")
+    ax.set_ylabel("Count")
+    ax.set_title("Aspect Ratio Distribution by Class")
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "aspect_ratio_distribution.png", dpi=150)
+    plt.close()
+    print(f"  ✓ aspect_ratio_distribution.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  CSV export
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def export_csv(recs: list[Rec]) -> None:
+    _heading("CSV Export")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUTPUT_DIR / "image_stats.csv"
+    out = OUTPUT_DIR / "image_stats.csv"
 
     fields = [
         "split", "class", "filename", "width", "height", "aspect_ratio",
-        "file_size_kb", "mode", "brightness", "contrast", "sharpness",
-        "corrupted",
+        "file_size_kb", "mode", "brightness", "contrast", "sharpness", "corrupted",
     ]
-
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        for r in records:
-            writer.writerow({
-                "split": r.split,
-                "class": r.class_name,
-                "filename": r.path.name,
-                "width": r.width,
-                "height": r.height,
-                "aspect_ratio": r.aspect_ratio,
-                "file_size_kb": round(r.file_size_kb, 2),
-                "mode": r.mode,
-                "brightness": r.brightness,
-                "contrast": r.contrast,
-                "sharpness": r.sharpness,
-                "corrupted": r.corrupted,
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for r in recs:
+            w.writerow({
+                "split": r.split, "class": r.cls, "filename": r.path.name,
+                "width": r.w, "height": r.h, "aspect_ratio": r.ar,
+                "file_size_kb": round(r.size_kb, 2), "mode": r.mode,
+                "brightness": r.brightness, "contrast": r.contrast,
+                "sharpness": r.sharpness, "corrupted": r.corrupted,
             })
-
-    print(f"  Saved: {out_path} ({len(records)} rows)")
-
-
-# ── Final Report ──────────────────────────────────────────────────────────
+    print(f"  Saved {len(recs)} rows → {out}")
 
 
-def print_final_report(
-    records: list[ImageRecord],
+# ══════════════════════════════════════════════════════════════════════════
+#  Final report
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def final_report(
+    recs: list[Rec],
     counts: dict[str, dict[str, int]],
-    corrupted: list[ImageRecord],
-    dup_groups: dict[str, list[ImageRecord]],
+    corrupted: list[Rec],
+    dup_groups: dict[str, list[Rec]],
 ) -> None:
-    _section("FINAL EDA REPORT — Risks & Recommendations")
+    _heading("FINAL REPORT — Risks & Recommendations")
 
     risks: list[str] = []
-    recommendations: list[str] = []
+    recs_ok: list[str] = []
 
     # Class imbalance
-    train_c = counts.get("train", {})
-    if train_c:
-        ratio = train_c.get("PNEUMONIA", 0) / max(train_c.get("NORMAL", 1), 1)
+    tc = counts.get("train", {})
+    if tc:
+        ratio = tc.get("PNEUMONIA", 0) / max(tc.get("NORMAL", 1), 1)
         if ratio > 2.0:
-            risks.append(f"Severe class imbalance in train set (ratio {ratio:.1f}:1 PNEUMONIA:NORMAL)")
-            recommendations.append("Use weighted CrossEntropyLoss or oversampling for minority class")
+            risks.append(f"Severe class imbalance: train ratio {ratio:.1f}:1 (PNEUMONIA:NORMAL)")
+            recs_ok.append("Use weighted CrossEntropyLoss or oversampling for NORMAL class")
 
-    # Tiny validation set
-    val_total = sum(counts.get("val", {}).values())
-    if val_total < 50:
-        risks.append(f"Validation set extremely small ({val_total} images)")
-        recommendations.append("Validation metrics will be noisy — rely on test set for evaluation")
+    # Tiny val set
+    val_n = sum(counts.get("val", {}).values())
+    if val_n < 50:
+        risks.append(f"Validation set critically small ({val_n} images)")
+        recs_ok.append("Carve 10-15% from train as new validation split (stratified)")
 
-    # Corrupted files
+    # Corrupted
     if corrupted:
-        risks.append(f"{len(corrupted)} corrupted image(s) detected")
-        recommendations.append("Remove or replace corrupted files before training")
+        risks.append(f"{len(corrupted)} corrupted image(s)")
+        recs_ok.append("Remove corrupted files before training")
 
     # Duplicates
     if dup_groups:
-        total_dup = sum(len(recs) - 1 for recs in dup_groups.values())
-        risks.append(f"{total_dup} exact duplicate image(s) across {len(dup_groups)} group(s)")
-        recommendations.append("Review duplicates — may inflate metrics if across splits")
+        n_dup = sum(len(rs) - 1 for rs in dup_groups.values())
+        risks.append(f"{n_dup} exact duplicate image(s) in {len(dup_groups)} group(s)")
+        recs_ok.append("Deduplicate training set to prevent metric inflation")
 
-    # Variable dimensions
-    valid = [r for r in records if not r.corrupted]
-    unique_sizes = set((r.width, r.height) for r in valid)
-    if len(unique_sizes) > 5:
-        risks.append(f"Inconsistent image sizes ({len(unique_sizes)} unique dimensions)")
-        recommendations.append("Resize + CenterCrop in preprocessing is essential")
+    # Dimension variation
+    ok = [r for r in recs if not r.corrupted]
+    uniq_w = len(set(r.w for r in ok))
+    if uniq_w > 10:
+        risks.append(f"Highly variable dimensions ({uniq_w} unique widths)")
+        recs_ok.append("Resize(256) + CenterCrop(224) mandatory in preprocessing")
 
-    # Dark images
-    very_dark = sum(1 for r in valid if r.brightness < 30)
-    if very_dark > 0:
-        risks.append(f"{very_dark} very dark image(s) (brightness < 30)")
-        recommendations.append("Consider brightness normalization or CLAHE")
+    # File size disparity
+    n_sizes = [r.size_kb for r in ok if r.cls == "NORMAL"]
+    p_sizes = [r.size_kb for r in ok if r.cls == "PNEUMONIA"]
+    if n_sizes and p_sizes:
+        ratio_fs = np.mean(n_sizes) / max(np.mean(p_sizes), 1)
+        if ratio_fs > 3:
+            risks.append(f"File size disparity: NORMAL avg {np.mean(n_sizes):.0f} KB vs PNEUMONIA {np.mean(p_sizes):.0f} KB ({ratio_fs:.1f}×)")
+            recs_ok.append("Monitor for JPEG-artifact-based spurious correlation")
 
-    # Report
+    # Mixed color modes
+    rgb_n = sum(1 for r in ok if r.mode == "RGB")
+    if rgb_n > 0:
+        risks.append(f"{rgb_n} RGB images mixed with grayscale")
+        recs_ok.append("Standardize all to RGB via .convert('RGB') for pretrained models")
+
+    # Bright outliers
+    bright = sum(1 for r in ok if r.brightness > 220)
+    if bright:
+        risks.append(f"{bright} overexposed image(s) (brightness > 220)")
+        recs_ok.append("Review and potentially exclude overexposed images")
+
+    # Print
     if risks:
         print("  RISKS:\n")
         for i, r in enumerate(risks, 1):
             print(f"    {i}. {r}")
         print("\n  RECOMMENDATIONS:\n")
-        for i, r in enumerate(recommendations, 1):
+        for i, r in enumerate(recs_ok, 1):
             print(f"    {i}. {r}")
     else:
-        print("  No significant risks detected. Dataset appears clean.")
+        print("  No significant risks. Dataset appears clean.")
 
-    print(f"\n  Total images analysed: {len(records):,}")
-    print(f"  Corrupted: {len(corrupted)}")
-    print(f"  Output directory: {OUTPUT_DIR}")
+    print(f"\n  Images analysed:   {len(recs):,}")
+    print(f"  Corrupted:         {len(corrupted)}")
+    print(f"  Output directory:  {OUTPUT_DIR}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -730,79 +759,78 @@ def print_final_report(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Chest X-Ray Dataset — Professional Medical Imaging EDA",
-    )
+    parser = argparse.ArgumentParser(description="Chest X-Ray EDA")
     parser.add_argument("--no-plots", action="store_true", help="Skip plot generation")
-    parser.add_argument("--no-hash", action="store_true", help="Skip SHA-256 hashing (faster)")
+    parser.add_argument("--no-hash", action="store_true", help="Skip MD5 hashing (faster)")
     args = parser.parse_args()
 
-    print("=" * 60)
+    print("=" * 64)
     print("  Chest X-Ray Dataset — Medical Imaging EDA")
-    print("=" * 60)
+    print("=" * 64)
     print(f"  Dataset: {DATA_DIR}")
     print(f"  Output:  {OUTPUT_DIR}")
 
     if not DATA_DIR.exists():
-        print(f"\n  ERROR: Dataset not found: {DATA_DIR}")
+        print(f"\n  ERROR: Dataset not found at {DATA_DIR}")
         sys.exit(1)
 
-    # ── Scan all images ───────────────────────────────────────────────
-    _section("Scanning dataset...")
+    # ── Scan ──────────────────────────────────────────────────────────
+    _heading("Scanning dataset")
 
-    start = time.time()
-    records: list[ImageRecord] = []
+    t0 = time.time()
+    recs: list[Rec] = []
+    for sname, sdir in SPLITS.items():
+        for cls, fpath in _iter_images(sdir):
+            recs.append(Rec(sname, cls, fpath))
 
-    for split_name, split_dir in SPLITS.items():
-        for class_name, file_path in _iter_images(split_dir):
-            records.append(ImageRecord(split_name, class_name, file_path))
+    print(f"  Found {len(recs):,} images")
+    hashing = not args.no_hash
+    print(f"  Analysing (dimensions, brightness, contrast, sharpness{', MD5' if hashing else ''}) …")
 
-    print(f"  Found {len(records):,} image files")
-    print(f"  Analysing (dimensions, brightness, contrast, sharpness{', SHA-256' if not args.no_hash else ''})...")
-
-    for i, r in enumerate(records):
-        r.analyse(compute_hash=not args.no_hash)
+    for i, r in enumerate(recs):
+        r.analyse(do_hash=hashing)
         if (i + 1) % 500 == 0:
-            print(f"    ... {i + 1:,}/{len(records):,}")
+            print(f"    {i + 1:,} / {len(recs):,}")
 
-    elapsed = time.time() - start
-    print(f"  Scan complete in {elapsed:.1f}s")
+    elapsed = time.time() - t0
+    print(f"  Done in {elapsed:.1f}s")
 
-    # ── Run all analysis sections ─────────────────────────────────────
-    counts = run_inventory(records)
-    corrupted = run_corrupted(records)
-    run_dimensions(records)
-    run_aspect_ratios(records)
-    run_file_sizes(records)
-    run_brightness_contrast(records)
-    run_sharpness(records)
-    run_duplicate_filenames(records)
-    dup_groups = run_exact_duplicates(records)
-    run_leakage_detection(records)
-    run_class_comparison(records)
+    # ── Analysis sections ─────────────────────────────────────────────
+    counts = sec_inventory(recs)
+    corrupted = sec_corrupted(recs)
+    sec_dimensions(recs)
+    sec_aspect_ratios(recs)
+    sec_file_sizes(recs)
+    sec_brightness_contrast(recs)
+    sec_sharpness(recs)
+    sec_dup_filenames(recs)
+    dup_groups = sec_exact_dups(recs)
+    sec_leakage(recs)
+    sec_class_comparison(recs)
 
     # ── Plots ─────────────────────────────────────────────────────────
     if not args.no_plots:
-        _section("Generating Plots")
+        _heading("Generating Plots")
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        plot_class_distribution(counts)
-        plot_dimension_scatter(records)
-        plot_brightness_histograms(records)
-        plot_contrast_comparison(records)
-        plot_file_size_distribution(records)
-        plot_sharpness_distribution(records)
-        plot_sample_grid(records)
+        plot_class_dist(counts)
+        plot_dimensions(recs)
+        plot_brightness(recs)
+        plot_contrast(recs)
+        plot_file_sizes(recs)
+        plot_sharpness(recs)
+        plot_intensity_hist(recs)
+        plot_aspect_ratio(recs)
+        plot_sample_grid(recs)
 
-    # ── CSV Export ────────────────────────────────────────────────────
-    _section("Exporting CSV")
-    export_csv(records)
+    # ── CSV ───────────────────────────────────────────────────────────
+    export_csv(recs)
 
-    # ── Final Report ──────────────────────────────────────────────────
-    print_final_report(records, counts, corrupted, dup_groups)
+    # ── Final report ──────────────────────────────────────────────────
+    final_report(recs, counts, corrupted, dup_groups)
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 64)
     print("  EDA complete.")
-    print("=" * 60)
+    print("=" * 64)
 
 
 if __name__ == "__main__":

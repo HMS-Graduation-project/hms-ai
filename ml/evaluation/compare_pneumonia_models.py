@@ -1,265 +1,234 @@
 """
-Compare DenseNet121 vs EfficientNet-B0 for pneumonia detection.
+Compare DenseNet121 vs EfficientNet-B0 vs ResNet50.
 
 Usage:
     cd hms-ai
     python -m ml.evaluation.compare_pneumonia_models
 """
-
 from __future__ import annotations
-
-import csv
-import sys
-import time
+import csv, sys, time
 from pathlib import Path
-
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve
 from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
 from tqdm import tqdm
+from ml.training.config import (BATCH_SIZE, CLASS_NAMES, DEVICE, IMAGENET_MEAN, IMAGENET_STD, METRICS_DIR, NUM_CLASSES, NUM_WORKERS, TEST_DIR)
 
-from ml.training.config import (
-    BATCH_SIZE, CLASS_NAMES, DEVICE, IMAGENET_MEAN, IMAGENET_STD,
-    METRICS_DIR, NUM_CLASSES, NUM_WORKERS, TEST_DIR,
-)
-
-CKPT_DENSE = Path(__file__).resolve().parent.parent / "checkpoints" / "pneumonia_densenet121_best.pt"
-CKPT_EFF = Path(__file__).resolve().parent.parent / "checkpoints" / "pneumonia_efficientnet_b0_best.pt"
+CKPT_DIR = Path(__file__).resolve().parent.parent / "checkpoints"
 OUT = METRICS_DIR / "model_comparison"
 
+MODELS = {
+    "DenseNet121": {"ckpt": CKPT_DIR / "pneumonia_densenet121_best.pt", "arch": "densenet121"},
+    "EfficientNet-B0": {"ckpt": CKPT_DIR / "pneumonia_efficientnet_b0_best.pt", "arch": "efficientnet_b0"},
+    "ResNet50": {"ckpt": CKPT_DIR / "pneumonia_resnet50_best.pt", "arch": "resnet50"},
+}
 
-def load_densenet() -> nn.Module:
-    model = models.densenet121(weights=None)
-    model.classifier = nn.Linear(model.classifier.in_features, NUM_CLASSES)
-    ckpt = torch.load(CKPT_DENSE, map_location=DEVICE, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.to(DEVICE).eval()
-    return model, ckpt
-
-
-def load_efficientnet() -> nn.Module:
-    model = models.efficientnet_b0(weights=None)
-    model.classifier[1] = nn.Linear(model.classifier[1].in_features, NUM_CLASSES)
-    ckpt = torch.load(CKPT_EFF, map_location=DEVICE, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.to(DEVICE).eval()
-    return model, ckpt
-
+def _build(arch):
+    if arch == "densenet121":
+        m = models.densenet121(weights=None); m.classifier = nn.Linear(m.classifier.in_features, NUM_CLASSES)
+    elif arch == "efficientnet_b0":
+        m = models.efficientnet_b0(weights=None); m.classifier[1] = nn.Linear(m.classifier[1].in_features, NUM_CLASSES)
+    elif arch == "resnet50":
+        m = models.resnet50(weights=None); m.fc = nn.Linear(m.fc.in_features, NUM_CLASSES)
+    else: raise ValueError(f"Unknown arch: {arch}")
+    return m
 
 @torch.no_grad()
 def run_inference(model, loader):
-    all_labels, all_probs = [], []
-    times = []
-    for images, labels in tqdm(loader, desc="  Inference", leave=False):
-        images = images.to(DEVICE)
-        t0 = time.time()
+    yl, ypr, times = [], [], []
+    for imgs, lbls in tqdm(loader, desc="  Inference", leave=False):
+        imgs = imgs.to(DEVICE); t0 = time.time()
         if DEVICE.type == "cuda":
-            with torch.amp.autocast("cuda"): logits = model(images)
-        else: logits = model(images)
-        times.append((time.time() - t0) / images.size(0))
-        probs = F.softmax(logits, dim=1)[:, 1].cpu().numpy()
-        all_labels.extend(labels.numpy()); all_probs.extend(probs)
-    return np.array(all_labels), np.array(all_probs), np.mean(times) * 1000
+            with torch.amp.autocast("cuda"): logits = model(imgs)
+        else: logits = model(imgs)
+        times.append((time.time() - t0) / imgs.size(0))
+        yl.extend(lbls.numpy()); ypr.extend(F.softmax(logits, 1)[:, 1].cpu().numpy())
+    return np.array(yl), np.array(ypr), np.mean(times) * 1000
 
-
-def compute_metrics(y_true, y_prob, threshold):
-    y_pred = (y_prob >= threshold).astype(int)
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    tn, fp, fn, tp = cm.ravel()
-    n = len(y_true)
-    acc = (tp + tn) / n; prec = tp / max(tp + fp, 1); rec = tp / max(tp + fn, 1)
+def compute_metrics(yt, yp, t):
+    pred = (yp >= t).astype(int); cm = confusion_matrix(yt, pred, labels=[0, 1]); tn, fp, fn, tp = cm.ravel()
+    n = len(yt); acc = (tp + tn) / n; prec = tp / max(tp + fp, 1); rec = tp / max(tp + fn, 1)
     spec = tn / max(tn + fp, 1); f1 = 2 * prec * rec / max(prec + rec, 1e-8)
-    try: auc = roc_auc_score(y_true, y_prob)
-    except ValueError: auc = 0.0
-    return {"accuracy": acc, "precision": prec, "recall": rec, "specificity": spec,
-            "f1": f1, "auc": auc, "FP": fp, "FN": fn, "TP": tp, "TN": tn}
+    try: auc = roc_auc_score(yt, yp)
+    except: auc = 0.0
+    return {"accuracy": acc, "precision": prec, "recall": rec, "specificity": spec, "f1": f1, "auc": auc, "FP": fp, "FN": fn, "TP": tp, "TN": tn}
 
-
-def find_optimal_threshold(y_true, y_prob):
+def find_threshold(yt, yp):
     best_f1 = 0; best_t = 0.5
     for t in np.arange(0.01, 1.0, 0.01):
-        y_pred = (y_prob >= t).astype(int)
-        tp = ((y_pred == 1) & (y_true == 1)).sum()
-        fp = ((y_pred == 1) & (y_true == 0)).sum()
-        fn = ((y_pred == 0) & (y_true == 1)).sum()
-        prec = tp / max(tp + fp, 1); rec = tp / max(tp + fn, 1)
-        f1 = 2 * prec * rec / max(prec + rec, 1e-8)
+        pred = (yp >= t).astype(int)
+        tp = ((pred == 1) & (yt == 1)).sum(); fp = ((pred == 1) & (yt == 0)).sum(); fn = ((pred == 0) & (yt == 1)).sum()
+        prec = tp / max(tp + fp, 1); rec = tp / max(tp + fn, 1); f1 = 2 * prec * rec / max(prec + rec, 1e-8)
         if f1 > best_f1: best_f1 = f1; best_t = round(t, 2)
     return best_t
 
+def main():
+    print("=" * 64); print("  3-Model Comparison: DenseNet121 vs EfficientNet-B0 vs ResNet50"); print("=" * 64)
 
-def main() -> None:
-    print("=" * 64)
-    print("  Model Comparison: DenseNet121 vs EfficientNet-B0")
-    print("=" * 64)
-
-    for ckpt, name in [(CKPT_DENSE, "DenseNet121"), (CKPT_EFF, "EfficientNet-B0")]:
-        if not ckpt.exists():
-            print(f"ERROR: {name} checkpoint not found: {ckpt}"); sys.exit(1)
+    for name, info in MODELS.items():
+        if not info["ckpt"].exists():
+            print(f"ERROR: {name} checkpoint not found: {info['ckpt']}"); sys.exit(1)
 
     OUT.mkdir(parents=True, exist_ok=True)
+    ds = datasets.ImageFolder(str(TEST_DIR), transform=transforms.Compose([
+        transforms.ToTensor(), transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)]))
+    loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
+    print(f"  Test: {len(ds)} images  Device: {DEVICE}\n")
 
-    test_ds = datasets.ImageFolder(str(TEST_DIR), transform=transforms.Compose([
-        transforms.ToTensor(), transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    ]))
-    loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
-    print(f"  Test: {len(test_ds)} images  Device: {DEVICE}\n")
+    results = {}
+    for name, info in MODELS.items():
+        print(f"  Loading {name}...")
+        model = _build(info["arch"])
+        ckpt = torch.load(info["ckpt"], map_location=DEVICE, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"]); model.to(DEVICE).eval()
+        params = sum(p.numel() for p in model.parameters()); size_mb = info["ckpt"].stat().st_size / 1024 / 1024
 
-    # DenseNet121
-    print("  Loading DenseNet121...")
-    dense_model, dense_ckpt = load_densenet()
-    dense_params = sum(p.numel() for p in dense_model.parameters())
-    dense_size = CKPT_DENSE.stat().st_size / 1024 / 1024
-    y_true, dense_prob, dense_ms = run_inference(dense_model, loader)
-    dense_thresh = find_optimal_threshold(y_true, dense_prob)
-    dense_m = compute_metrics(y_true, dense_prob, dense_thresh)
-    del dense_model; torch.cuda.empty_cache() if DEVICE.type == "cuda" else None
+        yt, yp, ms = run_inference(model, loader)
+        thresh = find_threshold(yt, yp); m = compute_metrics(yt, yp, thresh)
+        results[name] = {"thresh": thresh, "metrics": m, "params": params, "size_mb": size_mb, "ms": ms, "yt": yt, "yp": yp}
+        del model; torch.cuda.empty_cache() if DEVICE.type == "cuda" else None
 
-    # EfficientNet-B0
-    print("  Loading EfficientNet-B0...")
-    eff_model, eff_ckpt = load_efficientnet()
-    eff_params = sum(p.numel() for p in eff_model.parameters())
-    eff_size = CKPT_EFF.stat().st_size / 1024 / 1024
-    _, eff_prob, eff_ms = run_inference(eff_model, loader)
-    eff_thresh = find_optimal_threshold(y_true, eff_prob)
-    eff_m = compute_metrics(y_true, eff_prob, eff_thresh)
-    del eff_model; torch.cuda.empty_cache() if DEVICE.type == "cuda" else None
+    # Print table
+    print(f"\n  {'Metric':<20s}", end="")
+    for name in MODELS: print(f" {name:>18s}", end="")
+    print(f" {'Winner':>10s}")
+    print(f"  {'-' * (20 + 18 * len(MODELS) + 10)}")
 
-    # Print comparison
-    print(f"\n  {'Metric':<20s} {'DenseNet121':>15s} {'EfficientNet-B0':>18s} {'Winner':>10s}")
-    print(f"  {'-'*65}")
-    comparisons = [
-        ("Optimal Threshold", f"{dense_thresh:.2f}", f"{eff_thresh:.2f}", ""),
-        ("Accuracy", f"{dense_m['accuracy']:.4f}", f"{eff_m['accuracy']:.4f}",
-         "Dense" if dense_m['accuracy'] > eff_m['accuracy'] else "Eff"),
-        ("Precision", f"{dense_m['precision']:.4f}", f"{eff_m['precision']:.4f}",
-         "Dense" if dense_m['precision'] > eff_m['precision'] else "Eff"),
-        ("Recall", f"{dense_m['recall']:.4f}", f"{eff_m['recall']:.4f}",
-         "Dense" if dense_m['recall'] > eff_m['recall'] else "Eff"),
-        ("Specificity", f"{dense_m['specificity']:.4f}", f"{eff_m['specificity']:.4f}",
-         "Dense" if dense_m['specificity'] > eff_m['specificity'] else "Eff"),
-        ("F1", f"{dense_m['f1']:.4f}", f"{eff_m['f1']:.4f}",
-         "Dense" if dense_m['f1'] > eff_m['f1'] else "Eff"),
-        ("AUC-ROC", f"{dense_m['auc']:.4f}", f"{eff_m['auc']:.4f}",
-         "Dense" if dense_m['auc'] > eff_m['auc'] else "Eff"),
-        ("False Positives", str(dense_m['FP']), str(eff_m['FP']),
-         "Dense" if dense_m['FP'] < eff_m['FP'] else "Eff"),
-        ("False Negatives", str(dense_m['FN']), str(eff_m['FN']),
-         "Dense" if dense_m['FN'] < eff_m['FN'] else "Eff"),
-        ("Inference (ms/img)", f"{dense_ms:.1f}", f"{eff_ms:.1f}",
-         "Dense" if dense_ms < eff_ms else "Eff"),
-        ("Parameters", f"{dense_params/1e6:.1f}M", f"{eff_params/1e6:.1f}M",
-         "Eff" if eff_params < dense_params else "Dense"),
-        ("Checkpoint Size", f"{dense_size:.1f}MB", f"{eff_size:.1f}MB",
-         "Eff" if eff_size < dense_size else "Dense"),
+    rows_csv = []
+    metric_keys = [
+        ("Optimal Threshold", lambda r: f"{r['thresh']:.2f}"),
+        ("Accuracy", lambda r: f"{r['metrics']['accuracy']:.4f}"),
+        ("Precision", lambda r: f"{r['metrics']['precision']:.4f}"),
+        ("Recall", lambda r: f"{r['metrics']['recall']:.4f}"),
+        ("Specificity", lambda r: f"{r['metrics']['specificity']:.4f}"),
+        ("F1", lambda r: f"{r['metrics']['f1']:.4f}"),
+        ("AUC-ROC", lambda r: f"{r['metrics']['auc']:.4f}"),
+        ("False Positives", lambda r: str(r['metrics']['FP'])),
+        ("False Negatives", lambda r: str(r['metrics']['FN'])),
+        ("Inference (ms)", lambda r: f"{r['ms']:.1f}"),
+        ("Parameters", lambda r: f"{r['params']/1e6:.1f}M"),
+        ("Checkpoint", lambda r: f"{r['size_mb']:.1f}MB"),
     ]
-    for name, d, e, win in comparisons:
-        print(f"  {name:<20s} {d:>15s} {e:>18s} {win:>10s}")
+
+    for mname, fn in metric_keys:
+        vals = {n: fn(results[n]) for n in MODELS}
+        # Determine winner for numeric comparisons
+        winner = ""
+        if mname in ("Accuracy", "Precision", "Recall", "Specificity", "F1", "AUC-ROC"):
+            best = max(MODELS, key=lambda n: results[n]["metrics"].get(mname.lower().replace("-", "").replace(" ", ""), results[n]["metrics"].get("auc", 0)))
+            winner = best[:6]
+        elif mname == "False Negatives":
+            winner = min(MODELS, key=lambda n: results[n]["metrics"]["FN"])[:6]
+        elif mname == "False Positives":
+            winner = min(MODELS, key=lambda n: results[n]["metrics"]["FP"])[:6]
+        elif mname == "Inference (ms)":
+            winner = min(MODELS, key=lambda n: results[n]["ms"])[:6]
+        elif mname == "Parameters":
+            winner = min(MODELS, key=lambda n: results[n]["params"])[:6]
+
+        print(f"  {mname:<20s}", end="")
+        for n in MODELS: print(f" {vals[n]:>18s}", end="")
+        print(f" {winner:>10s}")
+        row = {"metric": mname}
+        for n in MODELS: row[n] = vals[n]
+        row["winner"] = winner
+        rows_csv.append(row)
 
     # Save CSV
-    csv_rows = [{"metric": n, "densenet121": d, "efficientnet_b0": e, "winner": w} for n, d, e, w in comparisons]
+    csv_fields = ["metric"] + list(MODELS.keys()) + ["winner"]
     with open(OUT / "model_comparison_metrics.csv", "w", newline="", encoding="utf-8") as f:
-        csv.DictWriter(f, fieldnames=["metric", "densenet121", "efficientnet_b0", "winner"]).writeheader()
-        csv.DictWriter(f, fieldnames=["metric", "densenet121", "efficientnet_b0", "winner"]).writerows(csv_rows)
+        w = csv.DictWriter(f, fieldnames=csv_fields); w.writeheader(); w.writerows(rows_csv)
 
     # Plots
     try:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-
+        colors = {"DenseNet121": "#4C72B0", "EfficientNet-B0": "#DD8452", "ResNet50": "#55A868"}
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-        # ROC curves
-        fpr_d, tpr_d, _ = roc_curve(y_true, dense_prob)
-        fpr_e, tpr_e, _ = roc_curve(y_true, eff_prob)
-        axes[0].plot(fpr_d, tpr_d, "b-", lw=2, label=f"DenseNet121 (AUC={dense_m['auc']:.3f})")
-        axes[0].plot(fpr_e, tpr_e, "r-", lw=2, label=f"EfficientNet-B0 (AUC={eff_m['auc']:.3f})")
-        axes[0].plot([0, 1], [0, 1], "--", color="gray")
-        axes[0].set_title("ROC Curves", fontweight="bold"); axes[0].legend(); axes[0].grid(alpha=0.3)
+        # ROC
+        for name in MODELS:
+            r = results[name]; fpr, tpr, _ = roc_curve(r["yt"], r["yp"])
+            axes[0].plot(fpr, tpr, color=colors[name], lw=2, label=f"{name} (AUC={r['metrics']['auc']:.3f})")
+        axes[0].plot([0, 1], [0, 1], "--", color="gray"); axes[0].set_title("ROC Curves", fontweight="bold")
+        axes[0].legend(fontsize=9); axes[0].grid(alpha=0.3)
 
-        # Metrics comparison bar
-        metric_names = ["Accuracy", "Precision", "Recall", "Specificity", "F1"]
-        dense_vals = [dense_m["accuracy"], dense_m["precision"], dense_m["recall"], dense_m["specificity"], dense_m["f1"]]
-        eff_vals = [eff_m["accuracy"], eff_m["precision"], eff_m["recall"], eff_m["specificity"], eff_m["f1"]]
-        x = np.arange(len(metric_names)); w = 0.35
-        axes[1].bar(x - w/2, dense_vals, w, label="DenseNet121", color="#4C72B0")
-        axes[1].bar(x + w/2, eff_vals, w, label="EfficientNet-B0", color="#DD8452")
-        axes[1].set_xticks(x); axes[1].set_xticklabels(metric_names, fontsize=9)
-        axes[1].set_ylim(0, 1.05); axes[1].set_title("Metrics Comparison", fontweight="bold")
-        axes[1].legend(); axes[1].grid(axis="y", alpha=0.3)
+        # Metrics bar
+        mnames = ["Accuracy", "Precision", "Recall", "Specificity", "F1"]
+        x = np.arange(len(mnames)); w = 0.25
+        for i, name in enumerate(MODELS):
+            r = results[name]["metrics"]
+            vals = [r["accuracy"], r["precision"], r["recall"], r["specificity"], r["f1"]]
+            axes[1].bar(x + i * w - w, vals, w, label=name, color=colors[name])
+        axes[1].set_xticks(x); axes[1].set_xticklabels(mnames, fontsize=8); axes[1].set_ylim(0, 1.05)
+        axes[1].set_title("Metrics", fontweight="bold"); axes[1].legend(fontsize=8); axes[1].grid(axis="y", alpha=0.3)
 
-        # Error counts
-        err_names = ["False Positives", "False Negatives"]
-        axes[2].bar(np.arange(2) - 0.2, [dense_m["FP"], dense_m["FN"]], 0.35, label="DenseNet121", color="#4C72B0")
-        axes[2].bar(np.arange(2) + 0.2, [eff_m["FP"], eff_m["FN"]], 0.35, label="EfficientNet-B0", color="#DD8452")
-        axes[2].set_xticks(np.arange(2)); axes[2].set_xticklabels(err_names)
-        axes[2].set_title("Error Counts", fontweight="bold"); axes[2].legend(); axes[2].grid(axis="y", alpha=0.3)
+        # Errors
+        err_names = ["FP", "FN"]; x2 = np.arange(2)
+        for i, name in enumerate(MODELS):
+            r = results[name]["metrics"]
+            axes[2].bar(x2 + i * 0.25 - 0.25, [r["FP"], r["FN"]], 0.22, label=name, color=colors[name])
+        axes[2].set_xticks(x2); axes[2].set_xticklabels(err_names)
+        axes[2].set_title("Errors", fontweight="bold"); axes[2].legend(fontsize=8); axes[2].grid(axis="y", alpha=0.3)
 
-        plt.suptitle("DenseNet121 vs EfficientNet-B0", fontsize=14, fontweight="bold")
+        plt.suptitle("DenseNet121 vs EfficientNet-B0 vs ResNet50", fontsize=14, fontweight="bold")
         plt.tight_layout(); plt.savefig(OUT / "model_comparison_charts.png", dpi=130); plt.close()
         print(f"\n  Saved: model_comparison_charts.png")
     except ImportError: pass
 
     # Clinical report
-    better_recall = "DenseNet121" if dense_m["recall"] > eff_m["recall"] else "EfficientNet-B0"
-    better_spec = "DenseNet121" if dense_m["specificity"] > eff_m["specificity"] else "EfficientNet-B0"
-    better_f1 = "DenseNet121" if dense_m["f1"] > eff_m["f1"] else "EfficientNet-B0"
-    fewer_fn = "DenseNet121" if dense_m["FN"] < eff_m["FN"] else "EfficientNet-B0"
+    best_recall = max(MODELS, key=lambda n: results[n]["metrics"]["recall"])
+    best_spec = max(MODELS, key=lambda n: results[n]["metrics"]["specificity"])
+    best_f1 = max(MODELS, key=lambda n: results[n]["metrics"]["f1"])
+    fewest_fn = min(MODELS, key=lambda n: results[n]["metrics"]["FN"])
+    fewest_fp = min(MODELS, key=lambda n: results[n]["metrics"]["FP"])
+    fastest = min(MODELS, key=lambda n: results[n]["ms"])
+    smallest = min(MODELS, key=lambda n: results[n]["params"])
 
-    report = f"""# Model Comparison Report
+    report = f"""# Three-Model Comparison Report
 
-## DenseNet121 vs EfficientNet-B0 for Pneumonia Detection
+## DenseNet121 vs EfficientNet-B0 vs ResNet50
 
-| Metric | DenseNet121 | EfficientNet-B0 |
-|--------|-------------|-----------------|
-| Optimal Threshold | {dense_thresh} | {eff_thresh} |
-| Accuracy | {dense_m['accuracy']:.4f} | {eff_m['accuracy']:.4f} |
-| Precision | {dense_m['precision']:.4f} | {eff_m['precision']:.4f} |
-| Recall (Sensitivity) | {dense_m['recall']:.4f} | {eff_m['recall']:.4f} |
-| Specificity | {dense_m['specificity']:.4f} | {eff_m['specificity']:.4f} |
-| F1-score | {dense_m['f1']:.4f} | {eff_m['f1']:.4f} |
-| AUC-ROC | {dense_m['auc']:.4f} | {eff_m['auc']:.4f} |
-| False Positives | {dense_m['FP']} | {eff_m['FP']} |
-| False Negatives | {dense_m['FN']} | {eff_m['FN']} |
-| Inference (ms/img) | {dense_ms:.1f} | {eff_ms:.1f} |
-| Parameters | {dense_params/1e6:.1f}M | {eff_params/1e6:.1f}M |
-| Checkpoint Size | {dense_size:.1f}MB | {eff_size:.1f}MB |
+| Metric | DenseNet121 | EfficientNet-B0 | ResNet50 |
+|--------|-------------|-----------------|----------|
+"""
+    for mname, fn in metric_keys:
+        vals = [fn(results[n]) for n in MODELS]
+        report += f"| {mname} | {vals[0]} | {vals[1]} | {vals[2]} |\n"
 
+    report += f"""
 ## Clinical Assessment
 
-1. **Better sensitivity (recall):** {better_recall} ({max(dense_m['recall'], eff_m['recall']):.1%})
-2. **Better specificity:** {better_spec} ({max(dense_m['specificity'], eff_m['specificity']):.1%})
-3. **Better F1 (overall):** {better_f1} ({max(dense_m['f1'], eff_m['f1']):.4f})
-4. **Fewer missed pneumonia (FN):** {fewer_fn} ({min(dense_m['FN'], eff_m['FN'])} missed)
-5. **Smaller model:** EfficientNet-B0 ({eff_params/1e6:.1f}M vs {dense_params/1e6:.1f}M)
+1. **Best sensitivity (recall):** {best_recall} ({results[best_recall]['metrics']['recall']:.1%})
+2. **Best specificity:** {best_spec} ({results[best_spec]['metrics']['specificity']:.1%})
+3. **Best F1 (overall):** {best_f1} ({results[best_f1]['metrics']['f1']:.4f})
+4. **Fewest missed pneumonia (FN):** {fewest_fn} ({results[fewest_fn]['metrics']['FN']})
+5. **Fewest false alarms (FP):** {fewest_fp} ({results[fewest_fp]['metrics']['FP']})
+6. **Fastest inference:** {fastest} ({results[fastest]['ms']:.1f} ms)
+7. **Smallest model:** {smallest} ({results[smallest]['params']/1e6:.1f}M params)
 
 ## Recommendation
 
-**{better_f1}** is recommended as the default model based on overall F1 performance.
+**{best_f1}** is recommended as the default model based on:
+- Highest overall F1 score
+- {"Highest recall (fewest missed cases)" if best_f1 == best_recall else f"Strong recall ({results[best_f1]['metrics']['recall']:.1%})"}
+- Clinically acceptable specificity
 
-For **screening priority** (maximize recall): use {better_recall}.
-For **confirmation** (minimize false positives): use {better_spec}.
+For **screening** (maximize detection): use {best_recall}.
+For **speed/resource-constrained** deployment: use {fastest}.
+For **confirmation** (minimize false positives): use {fewest_fp}.
 
-Both models are for **AI-assisted screening only**. Neither constitutes a final diagnosis.
+All models are for **AI-assisted screening only**. Not a final diagnosis.
 Clinical decisions must be made by qualified healthcare professionals.
 
 ## Known Limitations
-- Both trained on pediatric chest X-rays (ages 1-5) from a single center
-- Not validated for clinical deployment
+- All trained on pediatric chest X-rays (ages 1-5) from a single center
+- Not validated for adult populations or multi-center deployment
 - Compression bias partially mitigated by dataset standardization
 """
     with open(OUT / "model_comparison_report.md", "w", encoding="utf-8") as f: f.write(report)
     with open(OUT / "clinical_model_comparison.md", "w", encoding="utf-8") as f: f.write(report)
-    print(f"  Saved: model_comparison_report.md")
-    print(f"  Saved: clinical_model_comparison.md")
+    print(f"  Saved: model_comparison_report.md + clinical_model_comparison.md")
+    print(f"\n{'=' * 64}\n  Comparison complete.\n{'=' * 64}")
 
-    print(f"\n{'=' * 64}")
-    print(f"  Comparison complete.")
-    print(f"{'=' * 64}")
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

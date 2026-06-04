@@ -18,5 +18,7 @@ ml/checkpoints/*
 ml/eda/outputs/*
 !ml/eda/outputs/.gitkeep
 
-# Chest X-ray dataset (too large for git)
+# Chest X-ray datasets (too large for git)
 app/data/chest_xray/
+app/data/chest_xray_cleaned/
+app/data/chest_xray_quarantine/

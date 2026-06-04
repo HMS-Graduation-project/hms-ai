@@ -10,6 +10,8 @@ ai-env
 ml/checkpoints/
 ml/eda/outputs/
 app/data/chest_xray/
+app/data/chest_xray_cleaned/
+app/data/chest_xray_quarantine/
 *.pt
 *.pth
 *.onnx

@@ -414,9 +414,110 @@ def sec_class_weights(counts: dict[str, dict[str, int]]) -> dict[int, float]:
     return {0: round(w0, 4), 1: round(w1, 4)}
 
 
-# ══════════════════════════════════════════════════════════════════════════
+def sec_dedup_report(dup_groups: dict[str, list[Rec]]) -> list[dict]:
+    """Generate structured dedup removal report with JSON export."""
+    _heading("13 - Duplicate Removal Report")
+    if not dup_groups:
+        print("  No duplicates to report.")
+        return []
+    report: list[dict] = []
+    for h, rs in dup_groups.items():
+        keep = rs[0]
+        for r in rs[1:]:
+            report.append({"kept": keep.path.name, "removed": r.path.name,
+                           "hash": h[:12] + "...", "class": r.cls, "split": r.split})
+    by_cls: dict[str, int] = defaultdict(int)
+    for r in report: by_cls[r["class"]] += 1
+    print(f"  Total duplicate images to remove: {len(report)}")
+    for cls in CLASS_NAMES: print(f"    {cls}: {by_cls[cls]}")
+    print(f"\n  Sample removals:")
+    for r in report[:8]:
+        print(f"    REMOVE [{r['class']}] {r['removed']}  (keep: {r['kept']})")
+    if len(report) > 8: print(f"    ... and {len(report) - 8} more")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUTPUT_DIR / "dedup_report.json"
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump({"total_removed": len(report), "total_groups": len(dup_groups),
+                    "removed_files": report}, f, indent=2)
+    print(f"\n  Saved -> {out}")
+    return report
+
+
+def sec_val_split_proposal(counts: dict[str, dict[str, int]], dup_groups: dict[str, list[Rec]]) -> None:
+    """Propose stratified validation split to replace tiny Kaggle val set."""
+    _heading("14 - Validation Split Proposal")
+    tc = counts.get("train", {}); vc = counts.get("val", {})
+    val_total = sum(vc.values()); train_total = sum(tc.values())
+    n_dups = sum(len(rs) - 1 for rs in dup_groups.values()) if dup_groups else 0
+    clean_total = train_total - n_dups
+    print(f"  Current val set: {val_total} images (Kaggle original)")
+    if val_total >= 50:
+        print("  Val set is adequate."); return
+    proposed_val = int(clean_total * 0.15); proposed_train = clean_total - proposed_val
+    n_ratio = tc.get("NORMAL", 0) / max(train_total, 1)
+    val_n = int(proposed_val * n_ratio); val_p = proposed_val - val_n
+    train_n = int(proposed_train * n_ratio); train_p = proposed_train - train_n
+    print(f"\n  Proposed 15% stratified split (from {clean_total} clean train images):")
+    print(f"    New Train: NORMAL={train_n}  PNEUMONIA={train_p}  Total={proposed_train}")
+    print(f"    New Val:   NORMAL={val_n}  PNEUMONIA={val_p}  Total={proposed_val}")
+    print(f"    Test:      unchanged ({sum(counts.get('test', {}).values())} images)")
+    print(f"\n  Old val: {val_total} -> New val: {proposed_val} ({proposed_val // max(val_total, 1)}x larger)")
+
+
+def sec_grayscale_audit(recs: list[Rec]) -> None:
+    """Audit color mode consistency across classes."""
+    _heading("15 - Grayscale Standardization Audit")
+    ok = [r for r in recs if not r.corrupted]
+    mode_by_cls: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for r in ok: mode_by_cls[r.cls][r.mode] += 1
+    print("  Color modes by class:")
+    total_non_gray = 0
+    for cls in CLASS_NAMES:
+        modes = dict(mode_by_cls[cls]); print(f"    {cls}: {modes}")
+        total_non_gray += sum(v for k, v in modes.items() if k != "L")
+    if total_non_gray == 0:
+        print("\n  All images are grayscale. No conversion needed.")
+    else:
+        print(f"\n  {total_non_gray} non-grayscale image(s) detected.")
+        print(f"  For DenseNet121 (ImageNet pretrained): use .convert('RGB')")
+
+
+def sec_correlation(recs: list[Rec]) -> None:
+    """Point-biserial correlation between image features and class label."""
+    _heading("16 - Feature-Class Correlation Analysis")
+    ok = [r for r in recs if not r.corrupted]
+    labels = np.array([0 if r.cls == "NORMAL" else 1 for r in ok])
+    features = {
+        "width": np.array([r.w for r in ok], dtype=np.float64),
+        "height": np.array([r.h for r in ok], dtype=np.float64),
+        "aspect_ratio": np.array([r.ar for r in ok], dtype=np.float64),
+        "brightness": np.array([r.brightness for r in ok], dtype=np.float64),
+        "contrast": np.array([r.contrast for r in ok], dtype=np.float64),
+        "sharpness": np.array([r.sharpness for r in ok], dtype=np.float64),
+        "file_size_kb": np.array([r.size_kb for r in ok], dtype=np.float64),
+    }
+    try:
+        from scipy.stats import pointbiserialr
+    except ImportError:
+        print("  [skip] scipy not installed -- skipped"); return
+    print("  Point-biserial correlation with class (0=NORMAL, 1=PNEUMONIA):\n")
+    results: list[tuple[str, float, float]] = []
+    for name, vals in features.items():
+        r, p = pointbiserialr(labels, vals)
+        sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ""))
+        print(f"    {name:<16s}  r={r:+.4f}  p={p:.2e}  {sig}")
+        results.append((name, r, p))
+    strong = [(n, r, p) for n, r, p in results if abs(r) > 0.15 and p < 0.05]
+    if strong:
+        print(f"\n  Strongest correlations (|r| > 0.15, p < 0.05):")
+        for n, r, p in sorted(strong, key=lambda x: -abs(x[1])):
+            direction = "PNEUMONIA has higher" if r > 0 else "NORMAL has higher"
+            print(f"    {n}: r={r:+.4f} -- {direction}")
+
+
+# ======================================================================
 #  Plots
-# ══════════════════════════════════════════════════════════════════════════
+# ======================================================================
 
 
 def _save(plt, name: str) -> None:
@@ -954,6 +1055,10 @@ def main() -> None:
     sec_leakage(recs)
     class_stats = sec_class_comparison(recs)
     class_weights = sec_class_weights(counts)
+    dedup_report = sec_dedup_report(dup_groups)
+    sec_val_split_proposal(counts, dup_groups)
+    sec_grayscale_audit(recs)
+    sec_correlation(recs)
 
     # ── Plots ─────────────────────────────────────────────────────────
     if not args.no_plots:

@@ -1,18 +1,7 @@
 """
 Pneumonia Inference Predictor.
 
-Lazy-loading wrapper around the trained DenseNet121 checkpoint.
-Accepts an image path or raw bytes and returns a prediction dict.
-
-Usage:
-    from ml.inference.pneumonia_predictor import PneumoniaPredictor
-
-    predictor = PneumoniaPredictor()
-    result = predictor.predict("path/to/xray.jpg")
-    print(result)
-    # {"prediction": "PNEUMONIA", "confidence": 0.95, "probability": 0.95,
-    #  "probabilities": {"NORMAL": 0.05, "PNEUMONIA": 0.95},
-    #  "modelVersion": "pneumonia-densenet121-v1"}
+Lazy-loading singleton wrapper around the trained DenseNet121 checkpoint.
 """
 
 from __future__ import annotations
@@ -20,6 +9,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,84 +17,65 @@ from PIL import Image
 from torchvision import models, transforms
 
 from ml.training.config import (
-    BEST_MODEL_PATH,
-    CLASS_NAMES,
-    CROP_SIZE,
-    DEVICE,
-    IMAGE_SIZE,
-    IMAGENET_MEAN,
-    IMAGENET_STD,
-    MODEL_VERSION,
-    NUM_CLASSES,
+    BEST_MODEL_PATH, CLASS_NAMES, DEVICE, IMAGE_SIZE,
+    IMAGENET_MEAN, IMAGENET_STD, MODEL_VERSION, NUM_CLASSES,
 )
+
+CLINICAL_THRESHOLD = 0.94
 
 
 class PneumoniaPredictor:
-    """Lazy-loading inference wrapper for the pneumonia DenseNet121 model."""
+    """Lazy-loading inference wrapper. Model loads on first prediction."""
 
-    def __init__(self, checkpoint_path: Path | str | None = None):
+    _instance: PneumoniaPredictor | None = None
+
+    def __init__(self, checkpoint_path: Path | str | None = None,
+                 threshold: float = CLINICAL_THRESHOLD):
         self._checkpoint_path = Path(checkpoint_path) if checkpoint_path else BEST_MODEL_PATH
         self._model: nn.Module | None = None
         self._device = DEVICE
+        self._threshold = threshold
         self._transform = transforms.Compose([
-            transforms.Resize(IMAGE_SIZE),
-            transforms.CenterCrop(CROP_SIZE),
             transforms.ToTensor(),
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ])
 
+    @classmethod
+    def get_instance(cls) -> PneumoniaPredictor:
+        """Singleton access -- reuses model across requests."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
     def _load_model(self) -> nn.Module:
-        """Load the model from checkpoint on first use."""
         if self._model is not None:
             return self._model
 
         if not self._checkpoint_path.exists():
             raise FileNotFoundError(
-                f"Model checkpoint not found: {self._checkpoint_path}\n"
-                "Train the model first: python -m ml.training.train_pneumonia"
+                f"Checkpoint not found: {self._checkpoint_path}\n"
+                "Train first: python -m ml.training.train_pneumonia"
             )
 
         model = models.densenet121(weights=None)
         model.classifier = nn.Linear(model.classifier.in_features, NUM_CLASSES)
-
-        checkpoint = torch.load(
-            self._checkpoint_path, map_location=self._device, weights_only=False,
-        )
-        model.load_state_dict(checkpoint["model_state_dict"])
-        model.to(self._device)
-        model.eval()
+        ckpt = torch.load(self._checkpoint_path, map_location=self._device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.to(self._device).eval()
 
         self._model = model
         return model
 
     def _preprocess(self, image: Image.Image) -> torch.Tensor:
-        """Apply transforms and add batch dimension."""
-        # Chest X-rays are grayscale; DenseNet121 expects 3-channel RGB
-        image = image.convert("RGB")
-        tensor = self._transform(image)
-        return tensor.unsqueeze(0).to(self._device)
-
-    def predict(self, image_path: str | Path) -> dict:
-        """Predict from an image file path.
-
-        Returns:
-            dict with prediction, confidence, probability, probabilities, modelVersion
-        """
-        image = Image.open(image_path)
-        return self._predict_image(image)
-
-    def predict_from_bytes(self, image_bytes: bytes) -> dict:
-        """Predict from raw image bytes (for API upload integration).
-
-        Returns:
-            dict with prediction, confidence, probability, probabilities, modelVersion
-        """
-        image = Image.open(io.BytesIO(image_bytes))
-        return self._predict_image(image)
+        image = image.convert("RGB").resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.LANCZOS)
+        return self._transform(image).unsqueeze(0).to(self._device)
 
     @torch.no_grad()
     def _predict_image(self, image: Image.Image) -> dict:
-        """Core prediction logic."""
         model = self._load_model()
         input_tensor = self._preprocess(image)
 
@@ -114,16 +85,25 @@ class PneumoniaPredictor:
         else:
             logits = model(input_tensor)
 
-        probs = F.softmax(logits, dim=1).squeeze(0)
-        predicted_idx = probs.argmax().item()
-        confidence = probs[predicted_idx].item()
+        probs = F.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+        prob_pneumonia = float(probs[1])
+        is_positive = prob_pneumonia >= self._threshold
+        predicted_idx = 1 if is_positive else 0
 
         return {
             "prediction": CLASS_NAMES[predicted_idx],
-            "confidence": round(confidence, 4),
-            "probability": round(confidence, 4),
-            "probabilities": {
-                name: round(probs[i].item(), 4) for i, name in enumerate(CLASS_NAMES)
-            },
+            "probability": round(prob_pneumonia, 4),
+            "confidence": round(float(probs[predicted_idx]), 4),
+            "threshold": self._threshold,
+            "isPositive": is_positive,
+            "probabilities": {name: round(float(probs[i]), 4) for i, name in enumerate(CLASS_NAMES)},
             "modelVersion": MODEL_VERSION,
+            "device": str(self._device),
+            "clinicalNote": "AI-assisted screening result. Not a final diagnosis.",
         }
+
+    def predict(self, image_path: str | Path) -> dict:
+        return self._predict_image(Image.open(image_path))
+
+    def predict_from_bytes(self, data: bytes) -> dict:
+        return self._predict_image(Image.open(io.BytesIO(data)))

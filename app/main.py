@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.routers import health, interactions, predict, symptoms
+from app.routers import health, interactions, predict, symptoms, pneumonia
 
 app = FastAPI(
     title="HMS AI Service",
@@ -21,3 +21,6 @@ app.include_router(symptoms.router, prefix="/symptoms", tags=["Prediction"])
 
 # --- Drug Interactions ---
 app.include_router(interactions.router, prefix="/interactions", tags=["Interactions"])
+
+# --- Pneumonia Detection ---
+app.include_router(pneumonia.router, prefix="/api/v1/ai/pneumonia", tags=["Pneumonia Detection"])

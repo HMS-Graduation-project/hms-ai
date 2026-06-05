@@ -8,11 +8,12 @@ GET  /health  -- model status
 
 from __future__ import annotations
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from app.schemas.pneumonia import (
     PneumoniaHealthResponse,
     PneumoniaPredictionResponse,
     PneumoniaExplainResponse,
+    PneumoniaEnsembleResponse,
 )
 from app.services import pneumonia_service
 
@@ -99,5 +100,34 @@ async def explain(file: UploadFile = File(..., description="Chest X-ray image (J
         raise HTTPException(503, str(e))
     except Exception as e:
         raise HTTPException(500, f"Explanation failed: {e}")
+
+    return result
+
+
+@router.post(
+    "/ensemble",
+    response_model=PneumoniaEnsembleResponse,
+    summary="Ensemble prediction using DenseNet121 + EfficientNet-B0 + ResNet50",
+    description=(
+        "Upload a chest X-ray image. Runs three models and returns a "
+        "weighted-average ensemble result with individual model breakdown, "
+        "model agreement, and optional Grad-CAM from DenseNet121."
+    ),
+)
+async def ensemble_predict(
+    file: UploadFile = File(..., description="Chest X-ray image (JPG/PNG)"),
+    includeGradcam: bool = Form(default=False, description="Include Grad-CAM from DenseNet121"),
+):
+    data = await file.read()
+    _validate_upload(file, data)
+
+    try:
+        result = pneumonia_service.ensemble(data, include_gradcam=includeGradcam)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Ensemble prediction failed: {e}")
 
     return result

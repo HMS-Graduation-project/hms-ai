@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # Lazy imports -- torch may not be installed in all environments
 _predictor = None
 _gradcam = None
+_ensemble = None
 
 
 def _get_predictor():
@@ -25,6 +26,15 @@ def _get_predictor():
         _predictor = PneumoniaPredictor.get_instance()
         logger.info("Pneumonia predictor initialized (device=%s)", _predictor._device)
     return _predictor
+
+
+def _get_ensemble():
+    global _ensemble
+    if _ensemble is None:
+        from ml.inference.ensemble_predictor import EnsemblePredictor
+        _ensemble = EnsemblePredictor.get_instance()
+        logger.info("Ensemble predictor initialized")
+    return _ensemble
 
 
 def _get_gradcam():
@@ -125,5 +135,54 @@ def explain(file_bytes: bytes) -> dict:
         }
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+    return result
+
+
+def ensemble(file_bytes: bytes, include_gradcam: bool = False) -> dict:
+    """Run 3-model ensemble prediction with optional Grad-CAM from DenseNet121."""
+    from PIL import Image
+
+    # Validate
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        img.verify()
+    except Exception:
+        raise ValueError("Uploaded file is not a valid image")
+
+    ens = _get_ensemble()
+    result = ens.predict_ensemble(file_bytes)
+
+    if include_gradcam:
+        import tempfile
+        from pathlib import Path
+        import numpy as np
+
+        cam = _get_gradcam()
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
+        try:
+            original, heatmap, overlay, pred_class, probs = cam.generate_overlay(tmp_path)
+
+            def _to_base64(arr: np.ndarray) -> str:
+                img_out = Image.fromarray(arr)
+                buf = io.BytesIO()
+                img_out.save(buf, format="PNG")
+                return base64.b64encode(buf.getvalue()).decode("ascii")
+
+            result["explainability"] = {
+                "type": "Grad-CAM",
+                "sourceModel": "DenseNet121",
+                "overlayImageBase64": _to_base64(overlay),
+                "heatmapImageBase64": _to_base64(heatmap),
+                "clinicalNote": (
+                    "Heatmap generated from default DenseNet121 model. "
+                    "Red/yellow = high influence. Blue = low influence."
+                ),
+            }
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
 
     return result

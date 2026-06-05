@@ -9,6 +9,8 @@ ai-env
 # ML artifacts (exclude training outputs, keep inference runtime)
 ml/checkpoints/*
 !ml/checkpoints/pneumonia_densenet121_best.pt
+!ml/checkpoints/pneumonia_efficientnet_b0_best.pt
+!ml/checkpoints/pneumonia_resnet50_best.pt
 ml/eda/
 ml/evaluation/
 ml/training/train_pneumonia.py

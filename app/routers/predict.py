@@ -6,7 +6,7 @@ diseases ranked by Jaccard similarity confidence score.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from ..services.disease_predictor import ALL_SYMPTOMS, predict_diseases
@@ -63,24 +63,19 @@ class PredictResponse(BaseModel):
     ),
 )
 async def predict(request: PredictRequest) -> PredictResponse:
-    """Return top disease predictions for the given symptoms."""
-    # Validate that at least one symptom is recognised
+    """Return top disease predictions for the given symptoms.
+
+    Fallback behaviour: unrecognised symptom identifiers are silently ignored
+    rather than failing the whole request. Only the recognised subset is
+    scored. If nothing is recognised, an empty prediction list is returned.
+    """
     known = set(ALL_SYMPTOMS)
-    unknown = [s for s in request.symptoms if s not in known]
-    if unknown:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "message": "Unknown symptom identifiers",
-                "unknown_symptoms": unknown,
-                "hint": "Use GET /symptoms to list valid identifiers",
-            },
-        )
+    recognised = [s for s in request.symptoms if s in known]
 
-    results = predict_diseases(request.symptoms, top_k=3)
-
-    if not results:
+    if not recognised:
         return PredictResponse(predictions=[])
+
+    results = predict_diseases(recognised, top_k=3)
 
     return PredictResponse(
         predictions=[
